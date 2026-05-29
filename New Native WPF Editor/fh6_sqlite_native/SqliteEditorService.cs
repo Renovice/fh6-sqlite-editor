@@ -1,6 +1,7 @@
 using System.Data;
 using System.Globalization;
 using System.IO;
+using System.Text;
 using Microsoft.Data.Sqlite;
 
 namespace FH6SQLiteEditorNative;
@@ -19,6 +20,12 @@ internal sealed class SqliteEditorService : IDisposable
         string TableName,
         string CategoryName,
         string PartName);
+
+    private sealed record PartLevelProbe(long Level, long RowCount, long StockRows, string Ids);
+
+    private sealed record UpgradeTypeProbe(long Id, long IsException, long DisplayOrder, string Name, string Description, string IconPath, string ImagePath);
+
+    private sealed record UpgradeLevelProbe(long Level, long RowCount, string Ids, string Names);
 
     private readonly Dictionary<string, List<ColumnInfo>> _schema = new(StringComparer.OrdinalIgnoreCase);
     private readonly SqliteConnection _connection;
@@ -923,6 +930,354 @@ internal sealed class SqliteEditorService : IDisposable
             messages.Add(reader.GetString(0));
         }
         return string.Join(Environment.NewLine, messages);
+    }
+
+    public string ProbeUpgradeMenuChain(string table, long engineId)
+    {
+        if (!TableExists(table))
+        {
+            throw new InvalidOperationException($"Table does not exist: {table}");
+        }
+
+        var columns = GetColumns(table).Select(c => c.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (!columns.Contains("EngineID") || !columns.Contains("Level"))
+        {
+            throw new InvalidOperationException($"{table} is not an engine part table with EngineID and Level columns.");
+        }
+
+        var sb = new StringBuilder();
+        var findings = new List<string>();
+        var selectedLevels = EnginePartLevelProbeRows(table, engineId);
+        var selectedLevelSet = selectedLevels.Select(r => r.Level).ToHashSet();
+        var observedMax = EditorConstants.ObservedEnginePartMenuMaxLevel(table);
+        var specs = UpgradePartSpecsForTable(table);
+        var stockAspirationId = EngineStockAspirationId(engineId);
+        var aspirationSpec = AspirationSpecForTable(table);
+
+        sb.AppendLine($"Upgrade Menu Probe");
+        sb.AppendLine($"Table: {table}");
+        sb.AppendLine($"EngineID: {engineId}");
+        if (stockAspirationId.HasValue)
+        {
+            sb.AppendLine($"Engine stock AspirationID: {stockAspirationId.Value}");
+        }
+        sb.AppendLine();
+
+        sb.AppendLine("1. Selected engine part rows");
+        if (selectedLevels.Count == 0)
+        {
+            sb.AppendLine("   FAIL: no rows exist for this EngineID in this part table.");
+            findings.Add("Add part rows first. Without rows for this EngineID, the upgrade menu has nothing to show.");
+        }
+        else
+        {
+            foreach (var row in selectedLevels)
+            {
+                var stock = row.StockRows > 0 ? $", stock rows {row.StockRows}" : "";
+                sb.AppendLine($"   Level {row.Level}: {row.RowCount} row(s){stock}, Ids {Shorten(row.Ids, 140)}");
+                if (row.RowCount > 1)
+                {
+                    findings.Add($"Duplicate Level {row.Level} rows exist for EngineID {engineId}. The game may pick one unpredictably.");
+                }
+            }
+        }
+
+        var allLevels = ExistingLevelsForUpgradeTable(table).OrderBy(v => v).ToList();
+        sb.AppendLine($"   Table-wide levels: {FormatLevels(allLevels)}");
+        if (observedMax.HasValue)
+        {
+            sb.AppendLine($"   Base-observed visible max level for this part family: {observedMax.Value}");
+            var aboveCap = selectedLevels.Where(r => r.Level > observedMax.Value).Select(r => r.Level).Distinct().OrderBy(v => v).ToList();
+            if (aboveCap.Count > 0)
+            {
+                findings.Add($"Levels {FormatLevels(aboveCap)} are above the base-observed menu cap {observedMax.Value}. If metadata is complete and these still do not show, that is likely game UI/filter logic.");
+            }
+        }
+        sb.AppendLine();
+
+        sb.AppendLine("2. Data_UpgradePart mapping");
+        if (specs.Count == 0)
+        {
+            sb.AppendLine("   FAIL: no Data_UpgradePart row maps this table to a menu PartName.");
+            findings.Add("Data_UpgradePart is missing. Wire Menu cannot infer the menu type for this table.");
+        }
+        else
+        {
+            foreach (var spec in specs)
+            {
+                sb.AppendLine($"   Id {spec.Id}: Category={Blank(spec.CategoryName)}, PartName={Blank(spec.PartName)}");
+            }
+        }
+        sb.AppendLine();
+
+        foreach (var spec in specs)
+        {
+            sb.AppendLine($"3. Menu metadata for PartName {spec.PartName}");
+            var typeRows = UpgradeTypeProbeRows(spec.PartName);
+            if (typeRows.Count == 0)
+            {
+                sb.AppendLine("   FAIL: no UpgradeTypes row exists for this PartName.");
+                findings.Add($"UpgradeTypes.{spec.PartName} is missing. Use Wire Menu before expecting this part to appear.");
+                sb.AppendLine();
+                continue;
+            }
+
+            if (typeRows.Count > 1)
+            {
+                findings.Add($"{spec.PartName} has {typeRows.Count} UpgradeTypes rows. Duplicates can make the UI pick unexpected labels/levels.");
+            }
+
+            foreach (var type in typeRows)
+            {
+                sb.AppendLine($"   TypeId {type.Id}: IsException={type.IsException}, DisplayOrder={type.DisplayOrder}, Name={Blank(type.Name)}");
+                sb.AppendLine($"      Description={Blank(type.Description)}");
+                sb.AppendLine($"      Icon={Blank(type.IconPath)}, Image={Blank(type.ImagePath)}");
+                var areaLinks = UpgradeAreaLinksForType(type.Id);
+                if (!string.IsNullOrWhiteSpace(areaLinks))
+                {
+                    sb.AppendLine($"      UpgradeArea links: {areaLinks}");
+                }
+
+                var menuLevels = UpgradeLevelProbeRows(type.Id);
+                if (menuLevels.Count == 0)
+                {
+                    sb.AppendLine("      FAIL: no Upgrades rows exist for this TypeId.");
+                    findings.Add($"Upgrades rows are missing for TypeId {type.Id} ({spec.PartName}).");
+                    continue;
+                }
+
+                sb.AppendLine($"      Upgrades levels: {FormatLevels(menuLevels.Select(r => r.Level))}");
+                foreach (var level in menuLevels)
+                {
+                    sb.AppendLine($"         Level {level.Level}: {level.RowCount} row(s), Ids {Shorten(level.Ids, 100)}, Names {Shorten(level.Names, 160)}");
+                    if (level.RowCount > 1)
+                    {
+                        findings.Add($"TypeId {type.Id} has duplicate Upgrades rows for Level {level.Level}.");
+                    }
+                }
+
+                var menuLevelSet = menuLevels.Select(r => r.Level).ToHashSet();
+                var missingForRows = selectedLevelSet.Where(level => !menuLevelSet.Contains(level)).OrderBy(v => v).ToList();
+                if (missingForRows.Count > 0)
+                {
+                    findings.Add($"Part rows include levels {FormatLevels(missingForRows)} but TypeId {type.Id} has no matching Upgrades metadata.");
+                }
+                var menuWithoutRows = menuLevelSet.Where(level => !selectedLevelSet.Contains(level)).OrderBy(v => v).ToList();
+                if (selectedLevelSet.Count > 0 && menuWithoutRows.Count > 0)
+                {
+                    sb.AppendLine($"      Metadata levels not present on this engine: {FormatLevels(menuWithoutRows)}");
+                }
+            }
+            sb.AppendLine();
+        }
+
+        if (aspirationSpec is not null)
+        {
+            sb.AppendLine("4. Aspiration conversion chain");
+            var aspirationRow = AspirationProbeRow(aspirationSpec.AspirationId);
+            if (string.IsNullOrWhiteSpace(aspirationRow))
+            {
+                sb.AppendLine($"   FAIL: List_Aspiration row {aspirationSpec.AspirationId} is missing.");
+                findings.Add($"List_Aspiration row {aspirationSpec.AspirationId} is missing, so the conversion category cannot point to {aspirationSpec.PartName}.");
+            }
+            else
+            {
+                sb.AppendLine($"   {aspirationRow}");
+            }
+
+            var aspirationMenu = AspirationMenuRows(aspirationSpec.AspirationId);
+            if (string.IsNullOrWhiteSpace(aspirationMenu))
+            {
+                sb.AppendLine($"   FAIL: Upgrades TypeId 57 has no conversion row for AspirationID {aspirationSpec.AspirationId}.");
+                findings.Add($"The Body Kits/Conversions aspiration tile for {HumanizePartName(aspirationSpec.PartName)} is missing from Upgrades TypeId 57.");
+            }
+            else
+            {
+                sb.AppendLine($"   Conversion menu row(s): {aspirationMenu}");
+            }
+
+            if (stockAspirationId.HasValue && stockAspirationId.Value != aspirationSpec.AspirationId)
+            {
+                sb.AppendLine($"   This engine is stock AspirationID {stockAspirationId.Value}; {aspirationSpec.AspirationId} must be selected as a conversion before its upgrade submenu is relevant.");
+            }
+            sb.AppendLine();
+        }
+
+        sb.AppendLine("5. Result");
+        if (findings.Count == 0)
+        {
+            sb.AppendLine("   PASS: SQLite-side rows and metadata look complete for the selected engine/table.");
+            if (observedMax.HasValue)
+            {
+                sb.AppendLine($"   If levels above {observedMax.Value} still do not show in-game, the next suspect is game UI/filter code, not missing SQLite metadata.");
+            }
+        }
+        else
+        {
+            foreach (var finding in findings.Distinct())
+            {
+                sb.AppendLine("   - " + finding);
+            }
+        }
+
+        return sb.ToString();
+    }
+
+    private IReadOnlyList<PartLevelProbe> EnginePartLevelProbeRows(string table, long engineId)
+    {
+        var columns = GetColumns(table).Select(c => c.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var idColumn = columns.Contains("Id") ? "Id" : "rowid";
+        var stockExpr = columns.Contains("IsStock") ? "SUM(CASE WHEN CAST(IsStock AS INTEGER) <> 0 THEN 1 ELSE 0 END)" : "0";
+        using var cmd = _connection.CreateCommand();
+        cmd.CommandText =
+            $"SELECT CAST(Level AS INTEGER) AS LevelValue, COUNT(*) AS RowCount, {stockExpr} AS StockRows, " +
+            $"GROUP_CONCAT(CAST({SqliteHelpers.Ident(idColumn)} AS TEXT), ',') AS Ids " +
+            $"FROM {SqliteHelpers.Ident(table)} WHERE EngineID=$engineId " +
+            "GROUP BY CAST(Level AS INTEGER) ORDER BY CAST(Level AS INTEGER)";
+        cmd.Parameters.AddWithValue("$engineId", engineId);
+        using var reader = cmd.ExecuteReader();
+        var rows = new List<PartLevelProbe>();
+        while (reader.Read())
+        {
+            rows.Add(new PartLevelProbe(
+                Convert.ToInt64(reader.GetValue(0), CultureInfo.InvariantCulture),
+                Convert.ToInt64(reader.GetValue(1), CultureInfo.InvariantCulture),
+                Convert.ToInt64(reader.GetValue(2), CultureInfo.InvariantCulture),
+                reader.IsDBNull(3) ? "" : reader.GetString(3)));
+        }
+        return rows;
+    }
+
+    private IReadOnlyList<UpgradeTypeProbe> UpgradeTypeProbeRows(string partName)
+    {
+        if (!TableExists("UpgradeTypes"))
+        {
+            return [];
+        }
+
+        using var cmd = _connection.CreateCommand();
+        cmd.CommandText =
+            "SELECT id, COALESCE(IsException, 0), COALESCE(DisplayOrder, 0), " +
+            "COALESCE(Name, ''), COALESCE(Description, ''), COALESCE(IconPath, ''), COALESCE(ImagePath, '') " +
+            "FROM UpgradeTypes WHERE PartName=$partName ORDER BY IsException, id";
+        cmd.Parameters.AddWithValue("$partName", partName);
+        using var reader = cmd.ExecuteReader();
+        var rows = new List<UpgradeTypeProbe>();
+        while (reader.Read())
+        {
+            rows.Add(new UpgradeTypeProbe(
+                Convert.ToInt64(reader.GetValue(0), CultureInfo.InvariantCulture),
+                Convert.ToInt64(reader.GetValue(1), CultureInfo.InvariantCulture),
+                Convert.ToInt64(reader.GetValue(2), CultureInfo.InvariantCulture),
+                reader.GetString(3),
+                reader.GetString(4),
+                reader.GetString(5),
+                reader.GetString(6)));
+        }
+        return rows;
+    }
+
+    private IReadOnlyList<UpgradeLevelProbe> UpgradeLevelProbeRows(long typeId)
+    {
+        if (!TableExists("Upgrades"))
+        {
+            return [];
+        }
+
+        using var cmd = _connection.CreateCommand();
+        cmd.CommandText =
+            "SELECT CAST(Level AS INTEGER) AS LevelValue, COUNT(*) AS RowCount, " +
+            "GROUP_CONCAT(CAST(id AS TEXT), ','), " +
+            "GROUP_CONCAT(CAST(id AS TEXT) || ':' || COALESCE(Name, ''), ' | ') " +
+            "FROM Upgrades WHERE CAST(TypeId AS INTEGER)=$typeId " +
+            "GROUP BY CAST(Level AS INTEGER) ORDER BY CAST(Level AS INTEGER), id";
+        cmd.Parameters.AddWithValue("$typeId", typeId);
+        using var reader = cmd.ExecuteReader();
+        var rows = new List<UpgradeLevelProbe>();
+        while (reader.Read())
+        {
+            rows.Add(new UpgradeLevelProbe(
+                Convert.ToInt64(reader.GetValue(0), CultureInfo.InvariantCulture),
+                Convert.ToInt64(reader.GetValue(1), CultureInfo.InvariantCulture),
+                reader.IsDBNull(2) ? "" : reader.GetString(2),
+                reader.IsDBNull(3) ? "" : reader.GetString(3)));
+        }
+        return rows;
+    }
+
+    private string UpgradeAreaLinksForType(long typeId)
+    {
+        if (!TableExists("UpgradeAreaForUpgradeType"))
+        {
+            return "";
+        }
+
+        using var cmd = _connection.CreateCommand();
+        cmd.CommandText =
+            "SELECT GROUP_CONCAT(CAST(UpgradeAreaId AS TEXT), ',') " +
+            "FROM UpgradeAreaForUpgradeType WHERE CAST(UpgradeTypeId AS INTEGER)=$typeId";
+        cmd.Parameters.AddWithValue("$typeId", typeId);
+        return Convert.ToString(cmd.ExecuteScalar(), CultureInfo.InvariantCulture) ?? "";
+    }
+
+    private string AspirationProbeRow(long aspirationId)
+    {
+        if (!TableExists("List_Aspiration"))
+        {
+            return "";
+        }
+
+        using var cmd = _connection.CreateCommand();
+        cmd.CommandText =
+            "SELECT AspirationID, Aspiration, DisplayName, ShortDisplayName, KeyPartName " +
+            "FROM List_Aspiration WHERE CAST(AspirationID AS INTEGER)=$id LIMIT 1";
+        cmd.Parameters.AddWithValue("$id", aspirationId);
+        using var reader = cmd.ExecuteReader();
+        if (!reader.Read())
+        {
+            return "";
+        }
+
+        var aspiration = reader.IsDBNull(1) ? "" : reader.GetString(1);
+        var displayName = reader.IsDBNull(2) ? "" : reader.GetString(2);
+        var shortDisplayName = reader.IsDBNull(3) ? "" : reader.GetString(3);
+        var keyPartName = reader.IsDBNull(4) ? "" : reader.GetString(4);
+        return $"List_Aspiration {reader.GetValue(0)}: Aspiration={Blank(aspiration)}, DisplayName={Blank(displayName)}, ShortDisplayName={Blank(shortDisplayName)}, KeyPartName={Blank(keyPartName)}";
+    }
+
+    private string AspirationMenuRows(long aspirationId)
+    {
+        if (!TableExists("Upgrades"))
+        {
+            return "";
+        }
+
+        using var cmd = _connection.CreateCommand();
+        cmd.CommandText =
+            "SELECT GROUP_CONCAT(CAST(id AS TEXT) || ':L' || CAST(Level AS TEXT) || ':' || COALESCE(Name, ''), ' | ') " +
+            "FROM Upgrades WHERE CAST(TypeId AS INTEGER)=57 AND CAST(IsException AS INTEGER)=0 AND CAST(Level AS INTEGER)=$level";
+        cmd.Parameters.AddWithValue("$level", aspirationId);
+        return Convert.ToString(cmd.ExecuteScalar(), CultureInfo.InvariantCulture) ?? "";
+    }
+
+    private static string FormatLevels(IEnumerable<long> levels)
+    {
+        var ordered = levels.Distinct().OrderBy(v => v).ToList();
+        return ordered.Count == 0 ? "(none)" : string.Join(", ", ordered);
+    }
+
+    private static string Blank(string? value)
+    {
+        return string.IsNullOrWhiteSpace(value) ? "(blank)" : value;
+    }
+
+    private static string Shorten(string value, int maxLength)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return "(none)";
+        }
+        return value.Length <= maxLength ? value : value[..Math.Max(0, maxLength - 3)] + "...";
     }
 
     public void SaveAs(string outputPath)

@@ -629,6 +629,29 @@ public partial class MainWindow : Window
         }
     }
 
+    private void ProbeMenuButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_editor is null ||
+            PartEngineCombo.SelectedItem is not EngineChoice engine ||
+            PartTableCombo.SelectedItem is not TableChoice table)
+        {
+            MessageBox.Show(this, "Pick an engine and engine part table first.", "Probe Menu", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        try
+        {
+            TryApplyCurrentTableChanges(showSuccess: false);
+            var report = _editor.ProbeUpgradeMenuChain(table.Name, engine.EngineId);
+            RenderMenuProbeView(report);
+            AppendLog($"Probed menu chain for {table.Name} EngineID {engine.EngineId}");
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, ex.Message, "Probe Menu failed", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
     private void WireMenuButton_Click(object sender, RoutedEventArgs e)
     {
         if (_editor is null || _currentTableName is null || !_editor.CanWireMenuMetadata(_currentTableName))
@@ -839,6 +862,7 @@ public partial class MainWindow : Window
         TableGrid.Visibility = Visibility.Collapsed;
         HtmlTableBorder.Visibility = Visibility.Collapsed;
         ValidatePanel.Visibility = Visibility.Collapsed;
+        MenuProbePanel.Visibility = Visibility.Collapsed;
         HtmlTableGrid.Children.Clear();
         FieldFormPanel.Children.Clear();
         FieldFormBorder.Visibility = Visibility.Visible;
@@ -865,6 +889,7 @@ public partial class MainWindow : Window
             FieldFormBorder.Visibility = Visibility.Collapsed;
             HtmlTableBorder.Visibility = Visibility.Collapsed;
             ValidatePanel.Visibility = Visibility.Collapsed;
+            MenuProbePanel.Visibility = Visibility.Collapsed;
             HtmlTableGrid.Children.Clear();
             FieldFormPanel.Children.Clear();
             return;
@@ -876,6 +901,7 @@ public partial class MainWindow : Window
             TableGrid.Visibility = Visibility.Collapsed;
             HtmlTableBorder.Visibility = Visibility.Collapsed;
             ValidatePanel.Visibility = Visibility.Collapsed;
+            MenuProbePanel.Visibility = Visibility.Collapsed;
             HtmlTableGrid.Children.Clear();
             FieldFormBorder.Visibility = Visibility.Visible;
             RenderFieldForm(_currentTable.Rows[0]);
@@ -885,6 +911,7 @@ public partial class MainWindow : Window
         FieldFormPanel.Children.Clear();
         FieldFormBorder.Visibility = Visibility.Collapsed;
         ValidatePanel.Visibility = Visibility.Collapsed;
+        MenuProbePanel.Visibility = Visibility.Collapsed;
         var displayRows = CurrentDisplayRows();
         if (ShouldUseHtmlTable(displayRows.Count))
         {
@@ -2116,6 +2143,7 @@ public partial class MainWindow : Window
                 ? "Select a car to choose one of its engines."
                 : "Pick an engine and part table, then copy a compatible template row into that engine.";
             UpdateAspirationTypeButton();
+            UpdateProbeMenuButton();
         }
         finally
         {
@@ -2147,6 +2175,7 @@ public partial class MainWindow : Window
         {
             PartTemplateCombo.ItemsSource = null;
             UpdateAspirationTypeButton();
+            UpdateProbeMenuButton();
             RefreshAspirationConversions();
             return;
         }
@@ -2191,6 +2220,7 @@ public partial class MainWindow : Window
             }
         }
         UpdateAspirationTypeButton();
+        UpdateProbeMenuButton();
         RefreshAspirationConversions();
     }
 
@@ -2250,6 +2280,17 @@ public partial class MainWindow : Window
         EnableAspirationTypeButton.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
         EnableAspirationTypeButton.ToolTip = visible
             ? "Creates missing global menu metadata for this part table, including extra Level rows and dormant types such as Quad Turbo."
+            : null;
+    }
+
+    private void UpdateProbeMenuButton()
+    {
+        var visible = SelectedTabIndex() == 2 &&
+                      PartEngineCombo.SelectedItem is EngineChoice &&
+                      PartTableCombo.SelectedItem is TableChoice;
+        ProbeMenuButton.IsEnabled = visible;
+        ProbeMenuButton.ToolTip = visible
+            ? "Read-only diagnostic for this engine/table: part levels, UpgradeTypes, Upgrades metadata, aspiration mapping, duplicates, and likely menu cap issues."
             : null;
     }
 
@@ -2419,9 +2460,25 @@ public partial class MainWindow : Window
         TableGrid.Visibility = Visibility.Collapsed;
         FieldFormBorder.Visibility = Visibility.Collapsed;
         HtmlTableBorder.Visibility = Visibility.Collapsed;
+        MenuProbePanel.Visibility = Visibility.Collapsed;
         ValidatePanel.Visibility = Visibility.Visible;
         ValidateResultBox.Text = "Run the integrity check to validate the current session database.";
         TableStatusText.Text = "Validation ready.";
+    }
+
+    private void RenderMenuProbeView(string report)
+    {
+        TableGrid.ItemsSource = null;
+        TableGrid.Visibility = Visibility.Collapsed;
+        FieldFormBorder.Visibility = Visibility.Collapsed;
+        HtmlTableBorder.Visibility = Visibility.Collapsed;
+        ValidatePanel.Visibility = Visibility.Collapsed;
+        HtmlTableGrid.Children.Clear();
+        FieldFormPanel.Children.Clear();
+        MenuProbePanel.Visibility = Visibility.Visible;
+        MenuProbeResultBox.Text = report;
+        MenuProbeResultBox.ScrollToHome();
+        TableStatusText.Text = "Menu probe ready.";
     }
 
     private void RunValidation(bool showDialog)
@@ -2488,6 +2545,8 @@ public partial class MainWindow : Window
         HtmlTableBorder.BorderBrush = line;
         ValidatePanel.Background = surface;
         ValidatePanel.BorderBrush = line;
+        MenuProbePanel.Background = surface;
+        MenuProbePanel.BorderBrush = line;
         EngineToolsPanel.Background = soft;
         EngineToolsPanel.BorderBrush = line;
         PartToolsPanel.Background = soft;

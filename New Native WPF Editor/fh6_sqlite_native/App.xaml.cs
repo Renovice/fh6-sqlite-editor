@@ -149,6 +149,12 @@ public partial class App : Application
             var partTable = EditorConstants.EnginePartTables.FirstOrDefault(editor.TableExists);
             if (partTable is not null)
             {
+                var probe = editor.ProbeUpgradeMenuChain(partTable, before[0].EngineId);
+                if (!probe.Contains("Upgrade Menu Probe", StringComparison.OrdinalIgnoreCase))
+                {
+                    return 23;
+                }
+
                 var templates = editor.EnginePartTemplates(partTable, before[0].EngineId);
                 if (templates.Count > 0)
                 {
