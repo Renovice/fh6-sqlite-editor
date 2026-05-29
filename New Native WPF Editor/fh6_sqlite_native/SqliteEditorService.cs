@@ -986,11 +986,11 @@ internal sealed class SqliteEditorService : IDisposable
         sb.AppendLine($"   Table-wide levels: {FormatLevels(allLevels)}");
         if (observedMax.HasValue)
         {
-            sb.AppendLine($"   Base-observed visible max level for this part family: {observedMax.Value}");
+            sb.AppendLine($"   Base-data max level for this part family: {observedMax.Value} (not proof of a hard cap by itself)");
             var aboveCap = selectedLevels.Where(r => r.Level > observedMax.Value).Select(r => r.Level).Distinct().OrderBy(v => v).ToList();
             if (aboveCap.Count > 0)
             {
-                findings.Add($"Levels {FormatLevels(aboveCap)} are above the base-observed menu cap {observedMax.Value}. If metadata is complete and these still do not show, that is likely game UI/filter logic.");
+                findings.Add($"Levels {FormatLevels(aboveCap)} are above the base-data max {observedMax.Value}. If imported with complete metadata and still hidden in-game, that proves a UI/filter cap candidate.");
             }
         }
         sb.AppendLine();
@@ -1109,7 +1109,7 @@ internal sealed class SqliteEditorService : IDisposable
             sb.AppendLine("   PASS: SQLite-side rows and metadata look complete for the selected engine/table.");
             if (observedMax.HasValue)
             {
-                sb.AppendLine($"   If levels above {observedMax.Value} still do not show in-game, the next suspect is game UI/filter code, not missing SQLite metadata.");
+                sb.AppendLine($"   No selected row is above the base-data max {observedMax.Value}. To prove a cap, add a higher level, wire metadata, import, then check the game.");
             }
         }
         else
@@ -1118,6 +1118,109 @@ internal sealed class SqliteEditorService : IDisposable
             {
                 sb.AppendLine("   - " + finding);
             }
+        }
+
+        return sb.ToString();
+    }
+
+    public string ProbeUpgradeMenuOverview(long engineId)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine("Upgrade Menu Probe Overview");
+        sb.AppendLine($"EngineID: {engineId}");
+        var stockAspirationId = EngineStockAspirationId(engineId);
+        if (stockAspirationId.HasValue)
+        {
+            sb.AppendLine($"Engine stock AspirationID: {stockAspirationId.Value}");
+        }
+        sb.AppendLine("Base-data max is only an inference from the shipped DB. A real cap is proven only after a higher level has complete metadata, is imported, and still does not show in-game.");
+        sb.AppendLine();
+
+        foreach (var table in EditorConstants.EnginePartTables.Where(TableExists))
+        {
+            var columns = GetColumns(table).Select(c => c.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
+            if (!columns.Contains("EngineID") || !columns.Contains("Level"))
+            {
+                continue;
+            }
+
+            var selectedLevels = EnginePartLevelProbeRows(table, engineId);
+            var selectedLevelSet = selectedLevels.Select(r => r.Level).ToHashSet();
+            var observedMax = EditorConstants.ObservedEnginePartMenuMaxLevel(table);
+            var specs = UpgradePartSpecsForTable(table);
+            var status = new List<string>();
+
+            if (selectedLevels.Count == 0)
+            {
+                status.Add("no rows for this engine");
+            }
+
+            if (specs.Count == 0)
+            {
+                status.Add("missing Data_UpgradePart mapping");
+            }
+
+            var metadataPieces = new List<string>();
+            foreach (var spec in specs)
+            {
+                var typeIds = UpgradeTypeIdsForPartName(spec.PartName);
+                if (typeIds.Count == 0)
+                {
+                    status.Add($"missing UpgradeTypes.{spec.PartName}");
+                    metadataPieces.Add($"{spec.PartName}: no UpgradeTypes");
+                    continue;
+                }
+
+                foreach (var typeId in typeIds)
+                {
+                    var menuLevels = UpgradeLevelProbeRows(typeId);
+                    var menuLevelSet = menuLevels.Select(r => r.Level).ToHashSet();
+                    metadataPieces.Add($"{spec.PartName}/TypeId {typeId}: {FormatLevels(menuLevelSet)}");
+                    var missing = selectedLevelSet.Where(level => !menuLevelSet.Contains(level)).OrderBy(v => v).ToList();
+                    if (missing.Count > 0)
+                    {
+                        status.Add($"missing metadata for row levels {FormatLevels(missing)}");
+                    }
+                    var duplicateLevels = menuLevels.Where(r => r.RowCount > 1).Select(r => r.Level).Distinct().OrderBy(v => v).ToList();
+                    if (duplicateLevels.Count > 0)
+                    {
+                        status.Add($"duplicate metadata levels {FormatLevels(duplicateLevels)}");
+                    }
+                }
+            }
+
+            var duplicatePartLevels = selectedLevels.Where(r => r.RowCount > 1).Select(r => r.Level).Distinct().OrderBy(v => v).ToList();
+            if (duplicatePartLevels.Count > 0)
+            {
+                status.Add($"duplicate part levels {FormatLevels(duplicatePartLevels)}");
+            }
+
+            if (observedMax.HasValue)
+            {
+                var above = selectedLevels.Where(r => r.Level > observedMax.Value).Select(r => r.Level).Distinct().OrderBy(v => v).ToList();
+                if (above.Count > 0)
+                {
+                    status.Add($"above base-data max {observedMax.Value}: {FormatLevels(above)}");
+                }
+            }
+
+            if (status.Count == 0)
+            {
+                status.Add("SQLite chain looks complete within base-data levels");
+            }
+
+            var aspirationSpec = AspirationSpecForTable(table);
+            var aspirationText = aspirationSpec is null
+                ? ""
+                : $"; aspiration {aspirationSpec.AspirationId} {HumanizePartName(aspirationSpec.PartName)}";
+
+            sb.AppendLine(table);
+            sb.AppendLine($"  selected rows: {FormatPartLevelRows(selectedLevels)}");
+            sb.AppendLine($"  table-wide levels: {FormatLevels(ExistingLevelsForUpgradeTable(table))}");
+            sb.AppendLine($"  base-data max: {(observedMax.HasValue ? observedMax.Value.ToString(CultureInfo.InvariantCulture) : "unknown")}{aspirationText}");
+            sb.AppendLine($"  metadata: {(metadataPieces.Count == 0 ? "(none)" : string.Join("; ", metadataPieces))}");
+            sb.AppendLine($"  status: {string.Join("; ", status.Distinct())}");
+            sb.AppendLine();
         }
 
         return sb.ToString();
@@ -1264,6 +1367,20 @@ internal sealed class SqliteEditorService : IDisposable
     {
         var ordered = levels.Distinct().OrderBy(v => v).ToList();
         return ordered.Count == 0 ? "(none)" : string.Join(", ", ordered);
+    }
+
+    private static string FormatPartLevelRows(IReadOnlyList<PartLevelProbe> rows)
+    {
+        if (rows.Count == 0)
+        {
+            return "(none)";
+        }
+
+        return string.Join(", ", rows.Select(row =>
+        {
+            var stock = row.StockRows > 0 ? " stock" : "";
+            return $"L{row.Level}x{row.RowCount}{stock}";
+        }));
     }
 
     private static string Blank(string? value)

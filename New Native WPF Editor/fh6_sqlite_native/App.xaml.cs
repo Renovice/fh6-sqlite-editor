@@ -154,6 +154,11 @@ public partial class App : Application
                 {
                     return 23;
                 }
+                var overview = editor.ProbeUpgradeMenuOverview(before[0].EngineId);
+                if (!overview.Contains("Upgrade Menu Probe Overview", StringComparison.OrdinalIgnoreCase))
+                {
+                    return 24;
+                }
 
                 var templates = editor.EnginePartTemplates(partTable, before[0].EngineId);
                 if (templates.Count > 0)

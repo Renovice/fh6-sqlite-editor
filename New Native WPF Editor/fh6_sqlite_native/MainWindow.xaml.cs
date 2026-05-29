@@ -652,6 +652,28 @@ public partial class MainWindow : Window
         }
     }
 
+    private void ProbeAllMenusButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_editor is null ||
+            PartEngineCombo.SelectedItem is not EngineChoice engine)
+        {
+            MessageBox.Show(this, "Pick one of the current car engines first.", "Probe All", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        try
+        {
+            TryApplyCurrentTableChanges(showSuccess: false);
+            var report = _editor.ProbeUpgradeMenuOverview(engine.EngineId);
+            RenderMenuProbeView(report);
+            AppendLog($"Probed all engine part menu chains for EngineID {engine.EngineId}");
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, ex.Message, "Probe All failed", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
     private void WireMenuButton_Click(object sender, RoutedEventArgs e)
     {
         if (_editor is null || _currentTableName is null || !_editor.CanWireMenuMetadata(_currentTableName))
@@ -2291,6 +2313,10 @@ public partial class MainWindow : Window
         ProbeMenuButton.IsEnabled = visible;
         ProbeMenuButton.ToolTip = visible
             ? "Read-only diagnostic for this engine/table: part levels, UpgradeTypes, Upgrades metadata, aspiration mapping, duplicates, and likely menu cap issues."
+            : null;
+        ProbeAllMenusButton.IsEnabled = SelectedTabIndex() == 2 && PartEngineCombo.SelectedItem is EngineChoice;
+        ProbeAllMenusButton.ToolTip = ProbeAllMenusButton.IsEnabled
+            ? "Read-only summary of every engine part table for this engine. Use it to compare inferred base-data max levels before proving a real in-game cap."
             : null;
     }
 
