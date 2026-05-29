@@ -1,0 +1,39 @@
+# Local game databases and SQLite sidecar files
+*.db
+*.sqlite
+*.sqlite-*
+*.slt
+
+# Build outputs and binaries
+bin/
+obj/
+publish/
+singlepublish/
+*.exe
+*.dll
+*.pdb
+*.deps.json
+*.runtimeconfig.json
+
+# Archives and logs
+*.zip
+*.7z
+*.rar
+*.log
+
+# Local/editor state
+.vs/
+*.user
+*.suo
+
+# Local package folders that contain dumps, reference binaries, or old tooling
+README_FIRST.txt
+BASE DB/
+Export/
+Reference Helper/
+dumper_reference/
+reference/
+Old Python HTML Editor/
+New Native WPF Editor/publish/
+New Native WPF Editor/singlepublish/
+New Native WPF Editor/*.exe
