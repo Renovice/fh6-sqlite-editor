@@ -7,9 +7,6 @@ Native Windows/WPF SQLite editor for FH6 database dumps. It replaces the old Pyt
 - `New Native WPF Editor/fh6_sqlite_native`: WPF source code.
 - `New Native WPF Editor/DB_VALUE_MAP.md`: notes on values that appear to be effect/base/reference/display/menu/visual data.
 
-## What is intentionally not in git
-
-The local package folder also contains game DB dumps, helper/reference EXEs, old Python builds, and generated publish folders. Those are ignored on purpose so the repository stays clean and does not publish local game data or huge binary output.
 
 Put your clean untouched DB locally at:
 
