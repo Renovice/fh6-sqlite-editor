@@ -188,6 +188,39 @@ internal static class FieldValueRoles
             return Unknown;
         }
 
+        if (tableCanonical is "listtirecompound" or "listtyrecurvedb" or "listupgradetirecompound" or
+            "listupgradetirecompoundfictionmodoverride" or "combotirebrandcompound")
+        {
+            return TireGripRole(tableCanonical, c);
+        }
+
+        if (tableCanonical.Equals("listtorquecurve", StringComparison.OrdinalIgnoreCase))
+        {
+            if (c.StartsWith("camshaft", StringComparison.OrdinalIgnoreCase))
+            {
+                return Derived with
+                {
+                    Description = "Read-only camshaft row context. Edit the camshaft row or the torque curve values it points to."
+                };
+            }
+
+            if (c == "numtorquevalues")
+            {
+                return Effect with
+                {
+                    Description = "How many v0/v1/... torque samples the engine curve actually uses. Do not raise it unless the curve row has meaningful values for those extra indexes."
+                };
+            }
+
+            if (IsTorqueCurveValueColumn(c))
+            {
+                return Effect with
+                {
+                    Description = "A normalized torque sample in the full-throttle torque curve. The game reads v0 upward through NumTorqueValues across the camshaft TorqueCurveMaxRPM range."
+                };
+            }
+        }
+
         if (tableCanonical.Equals("listpartattribute", StringComparison.OrdinalIgnoreCase) && c is "mass" or "dragscale" or "windinstabilityscale")
         {
             return Reference with
@@ -247,12 +280,117 @@ internal static class FieldValueRoles
                    "baserollresistance" or "brakeprofilename" or
                    "frontdefrideheight" or "frontminrideheight" or "frontmaxrideheight" or
                    "reardefrideheight" or "rearminrideheight" or "rearmaxrideheight" or
+                   "frontstatictoe" or "frontstaticcamber" or "frontcaster" or
+                   "rearstatictoe" or "rearstaticcamber" or "rearcaster" or
+                   "frontsuspensionphysicstypeid" or "rearsuspensionphysicstypeid" or "steeringprofilename" or
                    "frontdefspringrate" or "frontminspringrate" or "frontmaxspringrate" or
                    "reardefspringrate" or "rearminspringrate" or "rearmaxspringrate" or
                    "frontdefswaybar" or "frontminswaybar" or "frontmaxswaybar" or "frontswaybardamping" or
                    "reardefswaybar" or "rearminswaybar" or "rearmaxswaybar" or "rearswaybardamping" or
+                   "camshaftupgradeid" or "camshaftlevel" or "camshaftisstock" or
+                   "camshaftredlinerpm" or "camshaftcurvemaxrpm" or "camshaftrpmentries" or
                    "part" or "axle" or "upgradeid" or "upgradelevel" or "upgradeisstock" or
                    "defaulttuneslider" or "drag0" or "downforce0" or "drag1" or "downforce1";
+    }
+
+    private static FieldValueRole TireGripRole(string tableCanonical, string c)
+    {
+        if (tableCanonical.Equals("listtyrecurvedb", StringComparison.OrdinalIgnoreCase))
+        {
+            return Effect with
+            {
+                Description = "Tire slip curve shape data. This changes where/how the tire reaches peak grip, but it is not the first place to add simple grip."
+            };
+        }
+
+        if (tableCanonical.Equals("listupgradetirecompoundfictionmodoverride", StringComparison.OrdinalIgnoreCase))
+        {
+            return Effect with
+            {
+                Description = "Per-upgrade tire grip override. Values above 1.0 add grip for that axle/direction; values below 1.0 remove grip."
+            };
+        }
+
+        if (tableCanonical.Equals("listupgradetirecompound", StringComparison.OrdinalIgnoreCase))
+        {
+            if (c is "fronttirepressure" or "reartirepressure")
+            {
+                return Effect with
+                {
+                    Description = "Default installed tire pressure in PSI. This changes the starting pressure, not the visible live tuning clamp."
+                };
+            }
+
+            if (c is "tirecompoundid")
+            {
+                return Selector;
+            }
+        }
+
+        if (tableCanonical.Equals("combotirebrandcompound", StringComparison.OrdinalIgnoreCase) &&
+            c is "frictionscale" or "peaksasrscale")
+        {
+            return Effect with
+            {
+                Description = "Brand/compound multiplier layered on top of the tire compound. Values above 1.0 increase grip/peak slip behavior."
+            };
+        }
+
+        if (c.Contains("accelspeed", StringComparison.OrdinalIgnoreCase))
+        {
+            return Reference with
+            {
+                Description = "Speed breakpoint for blending acceleration grip scale values. This is not a grip multiplier by itself."
+            };
+        }
+
+        if (c.Contains("frictionscale", StringComparison.OrdinalIgnoreCase))
+        {
+            return Effect with
+            {
+                Description = c.Contains("lat", StringComparison.OrdinalIgnoreCase)
+                    ? "Main lateral/cornering grip multiplier for this compound and surface. Higher values add cornering grip."
+                    : c.Contains("brake", StringComparison.OrdinalIgnoreCase)
+                        ? "Longitudinal braking grip multiplier for this compound and surface. Higher values add braking traction."
+                        : "Longitudinal acceleration grip multiplier for this compound and surface. Higher values add traction under power."
+            };
+        }
+
+        if (c.Contains("wetfrictionmod", StringComparison.OrdinalIgnoreCase))
+        {
+            return Effect with
+            {
+                Description = "Wet-condition tire behavior multiplier. Higher friction scale adds wet grip; slip scale changes how much it slides."
+            };
+        }
+
+        if (c.Contains("widthaffectfrictionscale", StringComparison.OrdinalIgnoreCase) ||
+            c.Contains("diameteraffectfrictionscale", StringComparison.OrdinalIgnoreCase))
+        {
+            return Effect with
+            {
+                Description = "Output multiplier for the tire size grip curve. The matching Width/Diameter fields are input breakpoints; this Scale field is the grip multiplier."
+            };
+        }
+
+        if (c.Contains("widthaffectfrictionwidth", StringComparison.OrdinalIgnoreCase) ||
+            c.Contains("diameteraffectfrictiondiameter", StringComparison.OrdinalIgnoreCase))
+        {
+            return Reference with
+            {
+                Description = "Input breakpoint for a tire size curve. Edit the paired Scale fields if you want more or less grip from tire size."
+            };
+        }
+
+        if (c is "defaultpressure" or "pressurechangespeed" or "pressureincreasewithmassscaler")
+        {
+            return Effect with
+            {
+                Description = "Tire pressure behavior in PSI/internal units. This affects tire physics, but it is not a direct grip multiplier."
+            };
+        }
+
+        return Effect;
     }
 
     private static string DerivedDescription(string c)
@@ -389,6 +527,13 @@ internal static class FieldValueRoles
                c.Contains("ratio", StringComparison.OrdinalIgnoreCase) ||
                c.Contains("inertia", StringComparison.OrdinalIgnoreCase) ||
                c.Contains("stiffness", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsTorqueCurveValueColumn(string c)
+    {
+        return c.Length > 1 &&
+               c[0] == 'v' &&
+               c.Skip(1).All(char.IsDigit);
     }
 
     private static string Canonical(string value)

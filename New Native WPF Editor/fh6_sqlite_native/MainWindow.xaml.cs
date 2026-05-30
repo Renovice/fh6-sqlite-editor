@@ -26,6 +26,7 @@ public partial class MainWindow : Window
     private bool _loadingEngineTools;
     private bool _loadingPartTools;
     private bool _loadingAeroTools;
+    private bool _loadingTuningTools;
     private bool _suppressTableSelectionChanged;
     private bool _darkMode;
     private bool _isClosing;
@@ -102,6 +103,15 @@ public partial class MainWindow : Window
         {
             OpenDatabase(dialog.FileName);
         }
+    }
+
+    private void LiveTuningButton_Click(object sender, RoutedEventArgs e)
+    {
+        var window = new LiveTuningPatcherWindow(_darkMode)
+        {
+            Owner = this
+        };
+        window.ShowDialog();
     }
 
     private async void DumpButton_Click(object sender, RoutedEventArgs e)
@@ -323,7 +333,7 @@ public partial class MainWindow : Window
 
         LoadSelectedTable();
         UpdateTemplatePanel();
-        RefreshEngineTools();
+        UpdateTabToolPanels();
     }
 
     private void EditorTabs_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -788,6 +798,51 @@ public partial class MainWindow : Window
         }
     }
 
+    private void CasterSpringDamperCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_loadingTuningTools)
+        {
+            return;
+        }
+
+        if (CasterSpringDamperCombo.SelectedItem is SpringDamperCasterChoice choice)
+        {
+            CasterOverrideBox.Text = choice.FrontCaster.ToString("0.###", CultureInfo.InvariantCulture);
+            TuningPanelNote.Text = $"Writes List_SpringDamperPhysics.Caster on front physics row {choice.FrontPhysicsId}. This is the physics/default caster value; no separate DB max-slider row was found.";
+        }
+    }
+
+    private void SetFrontCasterButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_editor is null || _selectedCar is null || CasterSpringDamperCombo.SelectedItem is not SpringDamperCasterChoice choice)
+        {
+            MessageBox.Show(this, "Select a car and a spring/damper row first.", "Set Front Caster", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        if (!TryParseUiDouble(CasterOverrideBox.Text, out var caster))
+        {
+            MessageBox.Show(this, "Enter a numeric caster value, for example 9.5.", "Set Front Caster", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        try
+        {
+            TryApplyCurrentTableChanges(showSuccess: false);
+            var message = _editor.SetFrontCaster(_selectedCar.Id, choice.SpringDamperId, caster);
+            AppendLog(message);
+            RefreshTuningTools();
+            if (_currentTableName is "List_UpgradeSpringDamper" or "List_SpringDamperPhysics" or "NewProfile_Career_Garage")
+            {
+                LoadSelectedTable();
+            }
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, ex.Message, "Set Front Caster failed", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
     private void WireMenuButton_Click(object sender, RoutedEventArgs e)
     {
         if (_editor is null || _currentTableName is null || !_editor.CanWireMenuMetadata(_currentTableName))
@@ -945,12 +1000,14 @@ public partial class MainWindow : Window
             TableGrid.ItemsSource = null;
             _currentTable = null;
             _currentTableName = null;
+            UpdateTableHint();
             return;
         }
 
         try
         {
             _currentTableName = choice.Name;
+            UpdateTableHint();
             if (_selectedCar is null && IsCarScopedTab())
             {
                 _currentTable = null;
@@ -995,6 +1052,7 @@ public partial class MainWindow : Window
             _currentTable = null;
             AppendLog($"Load table failed: {ex.Message}");
             TableStatusText.Text = "Table load failed.";
+            UpdateTableHint();
         }
     }
 
@@ -1100,7 +1158,7 @@ public partial class MainWindow : Window
 
         for (var c = 0; c < columns.Count; c++)
         {
-            AddHtmlHeaderCell(HumanizeFieldName(columns[c]), c, columns[c]);
+            AddHtmlHeaderCell(FriendlyFieldLabel(_currentTableName, columns[c]), c, columns[c]);
         }
         AddHtmlHeaderCell("Actions", columns.Count);
 
@@ -1192,6 +1250,31 @@ public partial class MainWindow : Window
         TableStatusText.Text = visible == total
             ? $"{_currentTableName}: {total} loaded row(s)"
             : $"{_currentTableName}: {visible} of {total} row(s) visible";
+    }
+
+    private void UpdateTableHint()
+    {
+        var hint = TableHintFor(_currentTableName);
+        TableHintText.Text = hint ?? "";
+        TableHintText.Visibility = string.IsNullOrWhiteSpace(hint) ? Visibility.Collapsed : Visibility.Visible;
+    }
+
+    private static string? TableHintFor(string? tableName)
+    {
+        return tableName switch
+        {
+            "List_TireCompound" =>
+                "Grip guide: increase Lateral Grip for cornering, Braking Grip for brake traction, and Accel Grip Scale 0/1 for traction under power. Offroad/Snow variants apply on those surfaces. Width/Diameter values are curve inputs; their Scale fields are the multipliers.",
+            "List_TyreCurveDB" =>
+                "Tire curve guide: these are slip-shape values, not simple grip multipliers. Start with List_TireCompound grip scales unless you specifically want to reshape peak slip behavior.",
+            "List_UpgradeTireCompoundFictionModOverride" =>
+                "Grip override guide: these multiply front/rear lateral and longitudinal grip for a specific tire upgrade part. Values above 1.0 add grip.",
+            "Combo_TireBrandCompound" =>
+                "Brand/compound guide: Friction Scale and Peak SASR Scale are tire-brand multipliers layered on top of the selected compound.",
+            "List_UpgradeTireCompound" =>
+                "Tire upgrade guide: TireCompoundID points to the real grip row in List_TireCompound. Front/Rear Tire Pressure are default PSI values, not raw grip.",
+            _ => null
+        };
     }
 
     private static string BuildDataViewFilter(DataTable table, string search)
@@ -1319,7 +1402,7 @@ public partial class MainWindow : Window
                 MinWidth = Math.Max(95, ColumnWidth(columnName) - 20),
                 Margin = new Thickness(7, 8, 7, 8),
                 Tag = (row, columnName),
-                ToolTip = columnName
+                ToolTip = FieldToolTip(columnName, isCurbWeightKg: false)
             };
             box.TextChanged += (_, _) =>
             {
@@ -1449,6 +1532,8 @@ public partial class MainWindow : Window
                 new LinkTarget("List_BrakeProfile", "BrakesProfileID", value),
             "AeroPhysicsID" when !_currentTableName.Equals("List_AeroPhysics", StringComparison.OrdinalIgnoreCase) =>
                 new LinkTarget("List_AeroPhysics", "AeroPhysicsID", value),
+            "TorqueCurveFullThrottleID" when !_currentTableName.Equals("List_TorqueCurve", StringComparison.OrdinalIgnoreCase) =>
+                new LinkTarget("List_TorqueCurve", "TorqueCurveID", value),
             "PreloadAndDroopDamperID" when !_currentTableName.Equals("List_PreloadAndDroopDamper", StringComparison.OrdinalIgnoreCase) =>
                 new LinkTarget("List_PreloadAndDroopDamper", "PreloadAndDroopDamperID", value),
             "FrontThirdSpringID" or "RearThirdSpringID" when !_currentTableName.Equals("List_ThirdSpringElement", StringComparison.OrdinalIgnoreCase) =>
@@ -1664,9 +1749,18 @@ public partial class MainWindow : Window
             ],
             "List_TireCompound" =>
             [
-                "TireCompoundID", "DisplayName", "KnownUpgradeLabels", "DefaultPressure", "TorqueFreeLatFrictionScale",
-                "TorqueFreeLongFrictionScaleBrake", "TorqueFreeLongFrictionScaleAccel0", "WetFrictionModFrictionScale",
-                "WetFrictionModSlipScale", "TireRollResistance", "IsOffroad", "FrictionMultiCurveLateralID", "FrictionMultiCurveLongitudinalAccelID"
+                "TireCompoundID", "DisplayName", "KnownUpgradeLabels",
+                "TorqueFreeLatFrictionScale", "TorqueFreeLongFrictionScaleBrake",
+                "TorqueFreeLongFrictionScaleAccel0", "TorqueFreeLongFrictionScaleAccel1",
+                "TorqueFreeLatFrictionScale_Offroad", "TorqueFreeLongFrictionScaleBrake_Offroad",
+                "TorqueFreeLongFrictionScaleAccel0_Offroad", "TorqueFreeLongFrictionScaleAccel1_Offroad",
+                "TorqueFreeLatFrictionScale_Snow", "TorqueFreeLongFrictionScaleBrake_Snow",
+                "TorqueFreeLongFrictionScaleAccel0_Snow", "TorqueFreeLongFrictionScaleAccel1_Snow",
+                "WetFrictionModFrictionScale", "WetFrictionModSlipScale",
+                "WidthAffectFrictionScale0", "WidthAffectFrictionScale1", "WidthAffectFrictionScale2",
+                "DiameterAffectFrictionScale0", "DiameterAffectFrictionScale1", "DiameterAffectFrictionScale2",
+                "DefaultPressure", "TireRollResistance", "IsOffroad",
+                "FrictionMultiCurveLateralID", "FrictionMultiCurveLongitudinalAccelID", "FrictionMultiCurveLongitudinalBrakeID"
             ],
             "List_TyreCurveDB" =>
             [
@@ -1691,7 +1785,9 @@ public partial class MainWindow : Window
             ],
             "List_UpgradeSpringDamper" =>
             [
-                "Id", "Ordinal", "Level", "IsStock", "FrontSpringDamperPhysicsID", "RearSpringDamperPhysicsID",
+                "Id", "Ordinal", "Level", "IsStock", "SteerMaxAngle", "SteerMaxAngleFiltered", "SteeringSettingsProfileID", "SteeringProfileName",
+                "FrontSpringDamperPhysicsID", "RearSpringDamperPhysicsID",
+                "FrontSuspensionPhysicsTypeID", "FrontStaticCamber", "FrontCaster", "RearStaticCamber", "RearCaster",
                 "FrontMinRideHeight", "FrontDefRideHeight", "FrontMaxRideHeight",
                 "RearMinRideHeight", "RearDefRideHeight", "RearMaxRideHeight",
                 "FrontMinSpringRate", "FrontMaxSpringRate", "RearMinSpringRate", "RearMaxSpringRate"
@@ -1699,9 +1795,22 @@ public partial class MainWindow : Window
             "List_SpringDamperPhysics" =>
             [
                 "SpringDamperPhysicsID", "Axle", "UpgradeId", "UpgradeLevel", "UpgradeIsStock",
+                "SuspensionPhysicsTypeID", "StaticToe", "StaticCamber", "Caster",
                 "DefRideHeight", "MinRideHeight", "MaxRideHeight", "DefSpringRate", "MinSpringRate", "MaxSpringRate",
                 "DefDampenBumpRate", "MinDampenBumpRate", "MaxDampenBumpRate",
                 "DefDampenReboundRate", "MinDampenReboundRate", "MaxDampenReboundRate"
+            ],
+            "List_SteeringSettings" =>
+            [
+                "SteeringSettingsID", "Name", "SteerMaxAngVelTurning", "SteerMaxAngVelStraighten", "SteerAngVelCountersteer",
+                "SteerAngVelDynFindPeak", "SteerSpeedSensitiveMinMaxAngle", "SteerSpeedSensitiveSlowSpeed",
+                "SteerSpeedSensitiveFastSpeed", "SteerSpeedSensitiveFastRateScale"
+            ],
+            "List_RearSteeringSettings" =>
+            [
+                "Id", "Name", "MaxRearSteerAngleAsFractionOfFront", "MaxRearSteerAngleForCounterSteer",
+                "LowSpeedCurveSpeedMS", "HighSpeedCurveSpeedMS", "LowSpeedCurveFrontNormAngle0",
+                "LowSpeedCurveRearNormAngle0", "HighSpeedCurveFrontNormAngle0", "HighSpeedCurveRearNormAngle0"
             ],
             "List_UpgradeAntiSwayFront" =>
             [
@@ -1749,6 +1858,11 @@ public partial class MainWindow : Window
                 "Id", "CarBodyID", "Level", "IsStock", "Sequence", "AeroPhysicsID", "DefaultTuneSlider",
                 "Drag0", "Downforce0", "Drag1", "Downforce1", "MassDiff", "DragScale", "WindInstabilityScale", "Price"
             ],
+            "List_TorqueCurve" =>
+            [
+                "TorqueCurveID", "CamshaftUpgradeId", "CamshaftLevel", "CamshaftIsStock", "CamshaftRedlineRPM",
+                "CamshaftCurveMaxRPM", "TorqueScale", "NumTorqueValues", "v0", "v10", "v20", "v40", "ZeroThrottleTorqueScale"
+            ],
             _ when EditorConstants.EnginePartTables.Contains(table, StringComparer.OrdinalIgnoreCase) =>
             [
                 "Id", "EngineID", "Level", "IsStock", "ManufacturerID", "PartsStringID", "PartsStringId", "Price",
@@ -1762,7 +1876,11 @@ public partial class MainWindow : Window
             "NewProfile_Career_Garage" =>
             [
                 "Id", "CarId", "PerformanceIndex", "ClassID", "SpeedRating", "HandlingRating", "AccelerationRating",
-                "LaunchRating", "BrakingRating", "CurbWeight", "Tuning_frontTirePressure", "Tuning_rearTirePressure"
+                "LaunchRating", "BrakingRating", "CurbWeight", "SpringDamper",
+                "Tuning_frontCaster", "Tuning_frontCamber", "Tuning_rearCamber", "Tuning_frontToe", "Tuning_rearToe",
+                "Tuning_frontRideHeight", "Tuning_rearRideHeight", "Tuning_frontSpring", "Tuning_rearSpring",
+                "Tuning_frontDampingStiffness", "Tuning_rearDampingStiffness", "Tuning_frontBumpRatio", "Tuning_rearBumpRatio",
+                "Tuning_frontTirePressure", "Tuning_rearTirePressure"
             ],
             "Data_Engine" =>
             [
@@ -1979,17 +2097,12 @@ public partial class MainWindow : Window
         var columns = row.Table.Columns.Cast<DataColumn>()
             .Where(c => c.ColumnName != "__fh6_rowid")
             .ToList();
-        if (_currentTableName?.Equals("Data_Car", StringComparison.OrdinalIgnoreCase) != true)
+        if (_currentTableName is null)
         {
             return columns;
         }
 
-        string[] preferred =
-        [
-            "Id", "Year", "MakeID", "MediaName", "ClassID", "PI", "PerformanceIndex",
-            "CurbWeightKg", "CurbWeight", "WeightDistribution",
-            "FrontTireWidthMM", "RearTireWidthMM", "FrontStockRideHeight", "RearStockRideHeight"
-        ];
+        var preferred = VisibleColumnsForTable(_currentTableName, row.Table);
 
         var ordered = new List<DataColumn>();
         foreach (var name in preferred)
@@ -2080,10 +2193,12 @@ public partial class MainWindow : Window
         var isEnginesTab = SelectedTabIndex() == 1;
         var isPartsTab = SelectedTabIndex() == 2;
         var isAeroTab = SelectedTabIndex() == 5;
+        var isTuningTab = SelectedTabIndex() == 7;
         var isValidateTab = IsValidateTab();
         EngineToolsPanel.Visibility = isEnginesTab ? Visibility.Visible : Visibility.Collapsed;
         PartToolsPanel.Visibility = isPartsTab ? Visibility.Visible : Visibility.Collapsed;
         AeroToolsPanel.Visibility = isAeroTab ? Visibility.Visible : Visibility.Collapsed;
+        TuningToolsPanel.Visibility = isTuningTab ? Visibility.Visible : Visibility.Collapsed;
         TableToolbar.Visibility = isValidateTab ? Visibility.Collapsed : Visibility.Visible;
         UpdateAddLinkedOptionButton();
         UpdateWireMenuButton();
@@ -2098,6 +2213,10 @@ public partial class MainWindow : Window
         if (isAeroTab)
         {
             RefreshAeroTools();
+        }
+        if (isTuningTab)
+        {
+            RefreshTuningTools();
         }
     }
 
@@ -2335,6 +2454,45 @@ public partial class MainWindow : Window
         RefreshAeroTemplates();
     }
 
+    private void RefreshTuningTools()
+    {
+        if (_editor is null || SelectedTabIndex() != 7)
+        {
+            return;
+        }
+
+        _loadingTuningTools = true;
+        try
+        {
+            var selectedId = (CasterSpringDamperCombo.SelectedItem as SpringDamperCasterChoice)?.SpringDamperId;
+            var choices = _selectedCar is null ? [] : _editor.SpringDamperCasterChoices(_selectedCar.Id).ToList();
+            CasterSpringDamperCombo.ItemsSource = choices;
+            CasterSpringDamperCombo.DisplayMemberPath = nameof(SpringDamperCasterChoice.Label);
+
+            if (selectedId.HasValue)
+            {
+                CasterSpringDamperCombo.SelectedItem = choices.FirstOrDefault(c => c.SpringDamperId == selectedId.Value);
+            }
+            if (CasterSpringDamperCombo.SelectedIndex < 0 && choices.Count > 0)
+            {
+                CasterSpringDamperCombo.SelectedIndex = 0;
+            }
+
+            var selected = CasterSpringDamperCombo.SelectedItem as SpringDamperCasterChoice;
+            CasterOverrideBox.Text = selected is null
+                ? ""
+                : selected.FrontCaster.ToString("0.###", CultureInfo.InvariantCulture);
+            SetFrontCasterButton.IsEnabled = selected is not null;
+            TuningPanelNote.Text = _selectedCar is null
+                ? "Select a car to edit its spring/damper caster source rows."
+                : "Writes List_SpringDamperPhysics.Caster for the selected spring/damper row. This can test values outside the normal in-game 1-7 slider range, but the visible tuning slider max itself was not found in SQLite.";
+        }
+        finally
+        {
+            _loadingTuningTools = false;
+        }
+    }
+
     private void UpdateAeroToolButtons()
     {
         var selected = AeroPartTableCombo.SelectedItem as AeroPartChoice;
@@ -2399,6 +2557,11 @@ public partial class MainWindow : Window
                table.Equals("List_UpgradeCarBodyFrontBumper", StringComparison.OrdinalIgnoreCase);
     }
 
+    private static bool IsTorqueCurveTable(string table)
+    {
+        return table.Equals("List_TorqueCurve", StringComparison.OrdinalIgnoreCase);
+    }
+
     private static string AeroPartLabel(string table)
     {
         return table switch
@@ -2432,12 +2595,28 @@ public partial class MainWindow : Window
             PartTableCombo.SelectedItem is not TableChoice table)
         {
             PartTemplateCombo.ItemsSource = null;
+            PartTemplateCombo.IsEnabled = false;
+            AddPartOptionButton.IsEnabled = false;
             UpdateAspirationTypeButton();
             UpdateProbeMenuButton();
             RefreshAspirationConversions();
             return;
         }
 
+        if (IsTorqueCurveTable(table.Name))
+        {
+            PartTemplateCombo.ItemsSource = null;
+            PartTemplateCombo.IsEnabled = false;
+            AddPartOptionButton.IsEnabled = false;
+            PartPanelNote.Text = "Torque curves are linked through camshaft rows. NumTorqueValues controls how many v0/v1/... samples are used; v columns are normalized full-throttle torque samples across the camshaft RPM range.";
+            UpdateAspirationTypeButton();
+            UpdateProbeMenuButton();
+            RefreshAspirationConversions();
+            return;
+        }
+
+        PartTemplateCombo.IsEnabled = true;
+        AddPartOptionButton.IsEnabled = true;
         var selected = PartTemplateCombo.SelectedItem as TemplateChoice;
         var templates = _editor.EnginePartTemplates(table.Name, engine.EngineId)
             .Select(t => new TemplateChoice(t.SourceTable, t.SourceId, t.Label))
@@ -2678,6 +2857,7 @@ public partial class MainWindow : Window
     {
         OpenDbButton.IsEnabled = !busy;
         DumpButton.IsEnabled = !busy;
+        LiveTuningButton.IsEnabled = !busy;
         SaveAsButton.IsEnabled = !busy;
         ImportButton.IsEnabled = !busy;
         ResetGameButton.IsEnabled = !busy;
@@ -2689,6 +2869,7 @@ public partial class MainWindow : Window
         LoadAeroPartRowsButton.IsEnabled = !busy && AeroPartTableCombo.SelectedItem is AeroPartChoice;
         AddAeroPartButton.IsEnabled = !busy && _selectedCar is not null && AeroPartTableCombo.SelectedItem is AeroPartChoice;
         WireAeroMenuButton.IsEnabled = !busy && AeroPartTableCombo.SelectedItem is AeroPartChoice choice && _editor?.CanWireMenuMetadata(choice.TableName) == true;
+        SetFrontCasterButton.IsEnabled = !busy && CasterSpringDamperCombo.SelectedItem is SpringDamperCasterChoice;
         CancelTaskButton.Visibility = busy ? Visibility.Visible : Visibility.Collapsed;
         ConnectionStateText.Text = busy ? "Working" : "Local";
     }
@@ -2838,6 +3019,10 @@ public partial class MainWindow : Window
         EngineToolsPanel.BorderBrush = line;
         PartToolsPanel.Background = soft;
         PartToolsPanel.BorderBrush = line;
+        AeroToolsPanel.Background = soft;
+        AeroToolsPanel.BorderBrush = line;
+        TuningToolsPanel.Background = soft;
+        TuningToolsPanel.BorderBrush = line;
         AppMark.Background = accent;
         ConnectionPill.Background = _darkMode ? Brush("#163323") : Brush("#eff8f3");
         ConnectionPill.BorderBrush = _darkMode ? Brush("#2d6a47") : Brush("#b9d7c7");
@@ -2914,6 +3099,7 @@ public partial class MainWindow : Window
         CarSubtitleText.Foreground = muted;
         TableStatusText.Foreground = muted;
         RoleLegendText.Foreground = muted;
+        TableHintText.Foreground = accent;
         EnginePanelNote.Foreground = muted;
         PartPanelNote.Foreground = muted;
         ThemeButton.Content = _darkMode ? "Light" : "Dark";
@@ -2999,16 +3185,14 @@ public partial class MainWindow : Window
 
     private static string HeaderTextForColumn(string? tableName, string columnName)
     {
-        var label = columnName.Equals("CurbWeightKg", StringComparison.OrdinalIgnoreCase)
-            ? "Curb Weight kg"
-            : HumanizeFieldName(columnName);
+        var label = FriendlyFieldLabel(tableName, columnName);
         var role = FieldValueRoles.ForColumn(tableName, columnName);
         return role.ShowBadge ? $"{label} [{role.Label}]" : label;
     }
 
     private string FieldLabelText(string columnName, bool isCurbWeightKg)
     {
-        var label = isCurbWeightKg ? "Curb Weight kg" : HumanizeFieldName(columnName);
+        var label = isCurbWeightKg ? "Curb Weight kg" : FriendlyFieldLabel(_currentTableName, columnName);
         var role = FieldValueRoles.ForColumn(_currentTableName, columnName);
         return role.ShowBadge ? $"{label} [{role.Label}]" : label;
     }
@@ -3018,10 +3202,147 @@ public partial class MainWindow : Window
         var role = FieldValueRoles.ForColumn(_currentTableName, columnName);
         var detail = isCurbWeightKg
             ? "Type kg. The DB CurbWeight field stores this as kg / 100."
-            : columnName;
+            : $"{FriendlyFieldLabel(_currentTableName, columnName)} ({columnName})";
         return role.ShowBadge
             ? $"{detail}{Environment.NewLine}{role.Label}: {role.Description}"
             : detail;
+    }
+
+    private static string? TorqueCurveFieldLabel(string? tableName, string columnName)
+    {
+        if (!string.Equals(tableName, "List_TorqueCurve", StringComparison.OrdinalIgnoreCase) ||
+            columnName.Length < 2 ||
+            columnName[0] != 'v' ||
+            !columnName.Skip(1).All(char.IsDigit))
+        {
+            return null;
+        }
+
+        return "Curve " + columnName.ToUpperInvariant();
+    }
+
+    private static string FriendlyFieldLabel(string? tableName, string columnName)
+    {
+        return TorqueCurveFieldLabel(tableName, columnName) ??
+               TireFieldLabel(tableName, columnName) ??
+               (columnName.Equals("CurbWeightKg", StringComparison.OrdinalIgnoreCase)
+                   ? "Curb Weight kg"
+                   : HumanizeFieldName(columnName));
+    }
+
+    private static string? TireFieldLabel(string? tableName, string columnName)
+    {
+        var table = tableName ?? "";
+        var c = columnName;
+        if (table.Equals("List_UpgradeTireCompound", StringComparison.OrdinalIgnoreCase))
+        {
+            return c switch
+            {
+                "TireCompoundID" => "Tire Compound Link",
+                "FrontTirePressure" => "Front Default Pressure PSI",
+                "RearTirePressure" => "Rear Default Pressure PSI",
+                "BaseDefaultPressure" => "Compound Base Pressure PSI",
+                _ => null
+            };
+        }
+
+        if (table.Equals("List_UpgradeTireCompoundFictionModOverride", StringComparison.OrdinalIgnoreCase))
+        {
+            return c switch
+            {
+                "FrontLatFrictionMult" => "Front Lateral Grip Override",
+                "FrontLongFrictionMult" => "Front Accel/Brake Grip Override",
+                "RearLatFrictionMult" => "Rear Lateral Grip Override",
+                "RearLongFrictionMult" => "Rear Accel/Brake Grip Override",
+                _ => null
+            };
+        }
+
+        if (table.Equals("Combo_TireBrandCompound", StringComparison.OrdinalIgnoreCase))
+        {
+            return c switch
+            {
+                "FrictionScale" => "Brand Grip Multiplier",
+                "PeakSASRScale" => "Brand Peak Slip Multiplier",
+                _ => null
+            };
+        }
+
+        if (table.Equals("List_TyreCurveDB", StringComparison.OrdinalIgnoreCase))
+        {
+            return TireCurveFieldLabel(c);
+        }
+
+        if (!table.Equals("List_TireCompound", StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        return c switch
+        {
+            "DefaultPressure" => "Default Pressure PSI",
+            "PressureChangeSpeed" => "Pressure Change Speed",
+            "PressureIncreaseWithMassScaler" => "Pressure Mass Scaling",
+            "TorqueFreeLatFrictionScale" => "Lateral Grip",
+            "TorqueFreeLatFrictionScale_Offroad" => "Offroad Lateral Grip",
+            "TorqueFreeLatFrictionScale_Snow" => "Snow Lateral Grip",
+            "TorqueFreeLongFrictionScaleBrake" => "Braking Grip",
+            "TorqueFreeLongFrictionScaleBrake_Offroad" => "Offroad Braking Grip",
+            "TorqueFreeLongFrictionScaleBrake_Snow" => "Snow Braking Grip",
+            "TorqueFreeLongFrictionScaleAccel0" => "Accel Grip Scale 0",
+            "TorqueFreeLongFrictionScaleAccel1" => "Accel Grip Scale 1",
+            "TorqueFreeLongFrictionScaleAccel0_Offroad" => "Offroad Accel Grip Scale 0",
+            "TorqueFreeLongFrictionScaleAccel1_Offroad" => "Offroad Accel Grip Scale 1",
+            "TorqueFreeLongFrictionScaleAccel0_Snow" => "Snow Accel Grip Scale 0",
+            "TorqueFreeLongFrictionScaleAccel1_Snow" => "Snow Accel Grip Scale 1",
+            "TorqueFreeLongFrictionScaleAccelSpeed0" => "Accel Grip Speed 0",
+            "TorqueFreeLongFrictionScaleAccelSpeed1" => "Accel Grip Speed 1",
+            "TorqueFreeLongFrictionScaleAccelSpeed0_Offroad" => "Offroad Accel Grip Speed 0",
+            "TorqueFreeLongFrictionScaleAccelSpeed1_Offroad" => "Offroad Accel Grip Speed 1",
+            "TorqueFreeLongFrictionScaleAccelSpeed0_Snow" => "Snow Accel Grip Speed 0",
+            "TorqueFreeLongFrictionScaleAccelSpeed1_Snow" => "Snow Accel Grip Speed 1",
+            "WetFrictionModFrictionScale" => "Wet Grip Multiplier",
+            "WetFrictionModSlipScale" => "Wet Slip Multiplier",
+            "TireRollResistance" => "Rolling Resistance",
+            "MomentInertia" => "Tire Moment Inertia",
+            _ when c.StartsWith("WidthAffectFrictionWidth", StringComparison.OrdinalIgnoreCase) =>
+                "Width Grip Breakpoint " + c[^1],
+            _ when c.StartsWith("WidthAffectFrictionScale", StringComparison.OrdinalIgnoreCase) =>
+                "Width Grip Multiplier " + c[^1],
+            _ when c.StartsWith("WidthAffectLoadWidth", StringComparison.OrdinalIgnoreCase) =>
+                "Width Load Breakpoint " + c[^1],
+            _ when c.StartsWith("WidthAffectLoadScale", StringComparison.OrdinalIgnoreCase) =>
+                "Width Load Multiplier " + c[^1],
+            _ when c.StartsWith("DiameterAffectFrictionDiameter", StringComparison.OrdinalIgnoreCase) =>
+                "Diameter Grip Breakpoint " + c[^1],
+            _ when c.StartsWith("DiameterAffectFrictionScale", StringComparison.OrdinalIgnoreCase) =>
+                "Diameter Grip Multiplier " + c[^1],
+            _ => null
+        };
+    }
+
+    private static string? TireCurveFieldLabel(string columnName)
+    {
+        var label = columnName
+            .Replace("Asph_", "Asphalt ")
+            .Replace("Off_", "Offroad ")
+            .Replace("Snow_", "Snow ")
+            .Replace("LatSlipPeak", "Lateral Slip Peak ")
+            .Replace("LongSlipPeak", "Accel Slip Peak ")
+            .Replace("BrkSlipPeak", "Brake Slip Peak ")
+            .Replace("LatCurveShape", "Lateral Curve Shape ")
+            .Replace("AccelCurveShape", "Accel Curve Shape ")
+            .Replace("BrkCurveShape", "Brake Curve Shape ")
+            .Replace("LatEnd", "Lateral End ")
+            .Replace("AccEnd", "Accel End ")
+            .Replace("BrkEnd", "Brake End ")
+            .Replace("PreLat", "Pre Lateral ")
+            .Replace("PreAcc", "Pre Accel ")
+            .Replace("PreBrk", "Pre Brake ")
+            .Replace("LatFlat", "Lateral Flat ")
+            .Replace("AccFlat", "Accel Flat ")
+            .Replace("BrkFlat", "Brake Flat ");
+        return label == columnName ? null : label;
     }
 
     private SolidColorBrush RoleBadgeBackground(FieldValueRoleKind kind)

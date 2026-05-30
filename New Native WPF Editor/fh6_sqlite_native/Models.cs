@@ -35,6 +35,11 @@ public sealed record AeroPartChoice(string TableName, string Label)
     public override string ToString() => Label;
 }
 
+public sealed record SpringDamperCasterChoice(long SpringDamperId, long Level, bool IsStock, long FrontPhysicsId, double FrontCaster, string Label)
+{
+    public override string ToString() => Label;
+}
+
 internal sealed record ColumnInfo(string Name, string Type, int PrimaryKeyRank);
 
 internal sealed record LocalTable(string Name, long RowCount, bool Changed);

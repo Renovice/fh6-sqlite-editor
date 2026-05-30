@@ -308,10 +308,42 @@ internal sealed class SqliteEditorService : IDisposable
             return new DataTable(table);
         }
 
+        if (table.Equals("List_TorqueCurve", StringComparison.OrdinalIgnoreCase))
+        {
+            return LoadEngineTorqueCurves(engineId);
+        }
+
         using var cmd = _connection.CreateCommand();
         cmd.CommandText = $"SELECT * FROM {SqliteHelpers.Ident(table)} WHERE EngineID=$engineId ORDER BY Level, Id";
         cmd.Parameters.AddWithValue("$engineId", engineId);
         return ReadDataTable(table, cmd);
+    }
+
+    private DataTable LoadEngineTorqueCurves(long engineId)
+    {
+        if (!TableExists("List_TorqueCurve") || !TableExists("List_UpgradeEngineCamshaft"))
+        {
+            return new DataTable("List_TorqueCurve");
+        }
+
+        using var cmd = _connection.CreateCommand();
+        cmd.CommandText =
+            "SELECT tc.*, cam.Id AS CamshaftUpgradeId, cam.Level AS CamshaftLevel, cam.IsStock AS CamshaftIsStock, " +
+            "cam.RedlineRPM AS CamshaftRedlineRPM, cam.TorqueCurveMaxRPM AS CamshaftCurveMaxRPM, " +
+            "cam.NumRPMEntriesArray AS CamshaftRpmEntries " +
+            "FROM List_UpgradeEngineCamshaft cam " +
+            "JOIN List_TorqueCurve tc ON tc.TorqueCurveID = cam.TorqueCurveFullThrottleID " +
+            "WHERE cam.EngineID=$engineId " +
+            "ORDER BY cam.IsStock DESC, cam.Level, cam.Id";
+        cmd.Parameters.AddWithValue("$engineId", engineId);
+        return MarkReadOnlyColumns(
+            ReadDataTable("List_TorqueCurve", cmd),
+            "CamshaftUpgradeId",
+            "CamshaftLevel",
+            "CamshaftIsStock",
+            "CamshaftRedlineRPM",
+            "CamshaftCurveMaxRPM",
+            "CamshaftRpmEntries");
     }
 
     public List<CarListItem> SearchCars(string search, string visibilityFilter)
@@ -452,6 +484,80 @@ internal sealed class SqliteEditorService : IDisposable
             $"LIMIT {limit}";
         cmd.Parameters.AddWithValue("$value", NormalizeDbValue(value));
         return ReadDataTable(table, cmd);
+    }
+
+    public IReadOnlyList<SpringDamperCasterChoice> SpringDamperCasterChoices(long carId)
+    {
+        if (!TableExists("List_UpgradeSpringDamper") || !TableExists("List_SpringDamperPhysics"))
+        {
+            return [];
+        }
+
+        using var cmd = _connection.CreateCommand();
+        cmd.CommandText =
+            "SELECT usd.Id, usd.Level, usd.IsStock, usd.FrontSpringDamperPhysicsID, f.Caster " +
+            "FROM List_UpgradeSpringDamper usd " +
+            "LEFT JOIN List_SpringDamperPhysics f ON f.SpringDamperPhysicsID = usd.FrontSpringDamperPhysicsID " +
+            "WHERE usd.Ordinal=$carId " +
+            "ORDER BY usd.IsStock DESC, usd.Level, usd.Id";
+        cmd.Parameters.AddWithValue("$carId", carId);
+
+        var result = new List<SpringDamperCasterChoice>();
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            var springDamperId = Convert.ToInt64(reader.GetValue(0), CultureInfo.InvariantCulture);
+            var level = Convert.ToInt64(reader.GetValue(1), CultureInfo.InvariantCulture);
+            var isStock = !reader.IsDBNull(2) && Convert.ToInt64(reader.GetValue(2), CultureInfo.InvariantCulture) != 0;
+            var frontPhysicsId = reader.IsDBNull(3) ? 0 : Convert.ToInt64(reader.GetValue(3), CultureInfo.InvariantCulture);
+            var frontCaster = reader.IsDBNull(4) ? 0 : Convert.ToDouble(reader.GetValue(4), CultureInfo.InvariantCulture);
+            var label = $"{(isStock ? "Stock" : "Level " + level.ToString(CultureInfo.InvariantCulture))} | Upgrade {springDamperId} | FrontPhysics {frontPhysicsId} | Caster {frontCaster.ToString("0.###", CultureInfo.InvariantCulture)}";
+            result.Add(new SpringDamperCasterChoice(springDamperId, level, isStock, frontPhysicsId, frontCaster, label));
+        }
+
+        return result;
+    }
+
+    public string SetFrontCaster(long carId, long springDamperId, double caster)
+    {
+        if (!TableExists("List_UpgradeSpringDamper") || !TableExists("List_SpringDamperPhysics"))
+        {
+            throw new InvalidOperationException("List_UpgradeSpringDamper and List_SpringDamperPhysics are required.");
+        }
+
+        using var lookup = _connection.CreateCommand();
+        lookup.CommandText =
+            "SELECT FrontSpringDamperPhysicsID FROM List_UpgradeSpringDamper " +
+            "WHERE Id=$springDamperId AND Ordinal=$carId";
+        lookup.Parameters.AddWithValue("$springDamperId", springDamperId);
+        lookup.Parameters.AddWithValue("$carId", carId);
+        var physicsValue = lookup.ExecuteScalar();
+        if (physicsValue is null or DBNull)
+        {
+            throw new InvalidOperationException($"Spring/damper row {springDamperId} was not found for car {carId}.");
+        }
+
+        var frontPhysicsId = Convert.ToInt64(physicsValue, CultureInfo.InvariantCulture);
+        using var tx = _connection.BeginTransaction();
+        try
+        {
+            using var updatePhysics = _connection.CreateCommand();
+            updatePhysics.Transaction = tx;
+            updatePhysics.CommandText =
+                "UPDATE List_SpringDamperPhysics SET Caster=$caster WHERE SpringDamperPhysicsID=$physicsId";
+            updatePhysics.Parameters.AddWithValue("$caster", caster);
+            updatePhysics.Parameters.AddWithValue("$physicsId", frontPhysicsId);
+            var physicsRows = updatePhysics.ExecuteNonQuery();
+
+            tx.Commit();
+            ApplyWalCheckpointIfPossible();
+            return $"Set front caster to {caster.ToString("0.###", CultureInfo.InvariantCulture)} on SpringDamper {springDamperId} / FrontPhysics {frontPhysicsId}. Updated {physicsRows} physics row(s). Garage/profile tune rows were not changed.";
+        }
+        catch
+        {
+            tx.Rollback();
+            throw;
+        }
     }
 
     private DataTable? TryLoadEnhancedDisplayTable(string table, long? selectedCarId, int limit)
@@ -628,15 +734,19 @@ internal sealed class SqliteEditorService : IDisposable
             using var cmd = _connection.CreateCommand();
             cmd.CommandText =
                 "SELECT " + selectPrefix + "usd.*, " +
+                "ss.Name AS SteeringProfileName, " +
+                "f.SuspensionPhysicsTypeID AS FrontSuspensionPhysicsTypeID, f.StaticToe AS FrontStaticToe, f.StaticCamber AS FrontStaticCamber, f.Caster AS FrontCaster, " +
                 "f.DefRideHeight AS FrontDefRideHeight, f.MinRideHeight AS FrontMinRideHeight, f.MaxRideHeight AS FrontMaxRideHeight, " +
                 "f.DefSpringRate AS FrontDefSpringRate, f.MinSpringRate AS FrontMinSpringRate, f.MaxSpringRate AS FrontMaxSpringRate, " +
                 "f.DefDampenBumpRate AS FrontDefBump, f.MinDampenBumpRate AS FrontMinBump, f.MaxDampenBumpRate AS FrontMaxBump, " +
                 "f.DefDampenReboundRate AS FrontDefRebound, f.MinDampenReboundRate AS FrontMinRebound, f.MaxDampenReboundRate AS FrontMaxRebound, " +
+                "r.SuspensionPhysicsTypeID AS RearSuspensionPhysicsTypeID, r.StaticToe AS RearStaticToe, r.StaticCamber AS RearStaticCamber, r.Caster AS RearCaster, " +
                 "r.DefRideHeight AS RearDefRideHeight, r.MinRideHeight AS RearMinRideHeight, r.MaxRideHeight AS RearMaxRideHeight, " +
                 "r.DefSpringRate AS RearDefSpringRate, r.MinSpringRate AS RearMinSpringRate, r.MaxSpringRate AS RearMaxSpringRate, " +
                 "r.DefDampenBumpRate AS RearDefBump, r.MinDampenBumpRate AS RearMinBump, r.MaxDampenBumpRate AS RearMaxBump, " +
                 "r.DefDampenReboundRate AS RearDefRebound, r.MinDampenReboundRate AS RearMinRebound, r.MaxDampenReboundRate AS RearMaxRebound " +
                 "FROM List_UpgradeSpringDamper usd " +
+                "LEFT JOIN List_SteeringSettings ss ON ss.SteeringSettingsID = usd.SteeringSettingsProfileID " +
                 "LEFT JOIN List_SpringDamperPhysics f ON f.SpringDamperPhysicsID = usd.FrontSpringDamperPhysicsID " +
                 "LEFT JOIN List_SpringDamperPhysics r ON r.SpringDamperPhysicsID = usd.RearSpringDamperPhysicsID " +
                 "WHERE usd.Ordinal=$carId ORDER BY usd.IsStock DESC, usd.Level, usd.Id LIMIT $limit";
@@ -644,10 +754,13 @@ internal sealed class SqliteEditorService : IDisposable
             cmd.Parameters.AddWithValue("$limit", limit);
             return MarkReadOnlyColumns(
                 ReadDataTable(table, cmd),
+                "SteeringProfileName",
+                "FrontSuspensionPhysicsTypeID", "FrontStaticToe", "FrontStaticCamber", "FrontCaster",
                 "FrontDefRideHeight", "FrontMinRideHeight", "FrontMaxRideHeight",
                 "FrontDefSpringRate", "FrontMinSpringRate", "FrontMaxSpringRate",
                 "FrontDefBump", "FrontMinBump", "FrontMaxBump",
                 "FrontDefRebound", "FrontMinRebound", "FrontMaxRebound",
+                "RearSuspensionPhysicsTypeID", "RearStaticToe", "RearStaticCamber", "RearCaster",
                 "RearDefRideHeight", "RearMinRideHeight", "RearMaxRideHeight",
                 "RearDefSpringRate", "RearMinSpringRate", "RearMaxSpringRate",
                 "RearDefBump", "RearMinBump", "RearMaxBump",

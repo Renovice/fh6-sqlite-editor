@@ -351,6 +351,7 @@
                     <Button x:Name="ThemeButton" Style="{StaticResource TopButton}" Content="Dark" Click="ThemeButton_Click"/>
                     <Button x:Name="OpenDbButton" Style="{StaticResource TopButton}" Content="Open DB" Click="OpenDbButton_Click"/>
                     <Button x:Name="DumpButton" Style="{StaticResource TopButton}" Content="Dump from Game" Click="DumpButton_Click"/>
+                    <Button x:Name="LiveTuningButton" Style="{StaticResource TopButton}" Content="Live Tuning" Click="LiveTuningButton_Click"/>
                     <Button x:Name="SaveAsButton" Style="{StaticResource TopButton}" Content="Save As" Click="SaveAsButton_Click"/>
                     <Button x:Name="ImportButton" Style="{StaticResource TopButton}" Content="Import to Game" Click="ImportButton_Click"/>
                     <Button x:Name="ResetGameButton" Style="{StaticResource TopButton}" Content="Reset Game to Base" Click="ResetGameButton_Click"/>
@@ -459,6 +460,12 @@
                                    FontSize="11"
                                    TextWrapping="Wrap"
                                    Margin="0,8,0,0"/>
+                        <TextBlock x:Name="TableHintText"
+                                   FontSize="12"
+                                   FontWeight="SemiBold"
+                                   TextWrapping="Wrap"
+                                   Visibility="Collapsed"
+                                   Margin="0,8,0,0"/>
 
                         <Border x:Name="EngineToolsPanel" Margin="0,10,0,0" Padding="10" BorderThickness="1" CornerRadius="8" Visibility="Collapsed">
                             <Grid>
@@ -543,6 +550,27 @@
                                     <Button x:Name="WireAeroMenuButton" Content="Wire Menu" Style="{StaticResource TopButton}" Margin="0,18,0,8" Click="WireAeroMenuButton_Click"/>
                                 </WrapPanel>
                                 <TextBlock x:Name="AeroPanelNote" Grid.Row="1" Text="Pick a part family, then add another row for the selected car/body with matching menu metadata." FontSize="12"/>
+                            </Grid>
+                        </Border>
+
+                        <Border x:Name="TuningToolsPanel" Margin="0,10,0,0" Padding="10" BorderThickness="1" CornerRadius="8" Visibility="Collapsed">
+                            <Grid>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="Auto"/>
+                                </Grid.RowDefinitions>
+                                <WrapPanel>
+                                    <StackPanel Width="460" Margin="0,0,10,8">
+                                        <TextBlock Text="Spring/Damper Row" FontSize="11" FontWeight="SemiBold" Margin="0,0,0,4"/>
+                                        <ComboBox x:Name="CasterSpringDamperCombo" SelectionChanged="CasterSpringDamperCombo_SelectionChanged"/>
+                                    </StackPanel>
+                                    <StackPanel Width="130" Margin="0,0,10,8">
+                                        <TextBlock Text="Front Caster" FontSize="11" FontWeight="SemiBold" Margin="0,0,0,4"/>
+                                        <TextBox x:Name="CasterOverrideBox"/>
+                                    </StackPanel>
+                                    <Button x:Name="SetFrontCasterButton" Content="Set Front Caster" Style="{StaticResource TopButton}" Margin="0,18,0,8" Click="SetFrontCasterButton_Click"/>
+                                </WrapPanel>
+                                <TextBlock x:Name="TuningPanelNote" Grid.Row="1" Text="Writes List_SpringDamperPhysics.Caster for the selected spring/damper row. The normal in-game slider range still appears hardcoded unless another file exposes it." FontSize="12"/>
                             </Grid>
                         </Border>
                     </StackPanel>

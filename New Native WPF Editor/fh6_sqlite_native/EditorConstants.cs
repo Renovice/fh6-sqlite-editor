@@ -24,6 +24,7 @@ internal static class EditorConstants
         "List_UpgradeEngineDisplacement",
         "List_UpgradeEnginePistonsCompression",
         "List_UpgradeEngineCamshaft",
+        "List_TorqueCurve",
         "List_UpgradeEngineFlywheel",
         "List_UpgradeEngineManifold",
         "List_UpgradeEngineRestrictorPlate",
@@ -108,6 +109,9 @@ internal static class EditorConstants
         "NewProfile_Career_Garage",
         "List_UpgradeSpringDamper",
         "List_SpringDamperPhysics",
+        "List_SteeringSettings",
+        "List_RearSteeringSettings",
+        "List_SuspensionPhysicsType",
         "List_UpgradeAntiSwayFront",
         "List_UpgradeAntiSwayRear",
         "List_AntiSwayPhysics",
@@ -195,7 +199,8 @@ internal static class EditorConstants
         {
             return 2;
         }
-        if (EnginePartTables.Contains(table, StringComparer.OrdinalIgnoreCase))
+        if (EnginePartTables.Contains(table, StringComparer.OrdinalIgnoreCase) &&
+            !table.Equals("List_TorqueCurve", StringComparison.OrdinalIgnoreCase))
         {
             return 3;
         }
