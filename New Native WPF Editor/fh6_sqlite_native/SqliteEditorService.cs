@@ -27,6 +27,10 @@ internal sealed class SqliteEditorService : IDisposable
 
     private sealed record UpgradeLevelProbe(long Level, long RowCount, string Ids, string Names);
 
+    private sealed record UpgradeWizardPartProbe(long Level, long RowCount, string Sorts);
+
+    private sealed record AeroOptionAddResult(long Id, long Level, long Sequence, long? AeroPhysicsId);
+
     private readonly Dictionary<string, List<ColumnInfo>> _schema = new(StringComparer.OrdinalIgnoreCase);
     private readonly SqliteConnection _connection;
 
@@ -986,11 +990,12 @@ internal sealed class SqliteEditorService : IDisposable
         sb.AppendLine($"   Table-wide levels: {FormatLevels(allLevels)}");
         if (observedMax.HasValue)
         {
-            sb.AppendLine($"   Base-data max level for this part family: {observedMax.Value} (not proof of a hard cap by itself)");
+            sb.AppendLine($"   Base-data max upgrade level: {observedMax.Value} (stock Level 0 is separate; base visible tiles can be stock + upgrades)");
+            sb.AppendLine($"   Base-data expected visible tiles: {BaseVisibleTileText(observedMax.Value)}");
             var aboveCap = selectedLevels.Where(r => r.Level > observedMax.Value).Select(r => r.Level).Distinct().OrderBy(v => v).ToList();
             if (aboveCap.Count > 0)
             {
-                findings.Add($"Levels {FormatLevels(aboveCap)} are above the base-data max {observedMax.Value}. If imported with complete metadata and still hidden in-game, that proves a UI/filter cap candidate.");
+                findings.Add($"Levels {FormatLevels(aboveCap)} are above the base-data max upgrade level {observedMax.Value}. If imported with complete metadata and still hidden in-game, that proves a UI/filter cap candidate.");
             }
         }
         sb.AppendLine();
@@ -1071,9 +1076,44 @@ internal sealed class SqliteEditorService : IDisposable
             sb.AppendLine();
         }
 
+        foreach (var spec in specs)
+        {
+            sb.AppendLine($"4. UpgradeWizardParts level list for {spec.PartName}");
+            var wizardLevels = UpgradeWizardPartProbeRows(spec.PartName);
+            if (wizardLevels.Count == 0)
+            {
+                sb.AppendLine("   No rows. This may stop some upgrade menu/wizard paths from requesting extra levels.");
+                if (selectedLevels.Any(r => r.RowCount > r.StockRows && r.Level > 0))
+                {
+                    findings.Add($"UpgradeWizardParts has no {spec.PartName} rows. Use Wire Menu so the game can see purchasable levels for this part family.");
+                }
+            }
+            else
+            {
+                sb.AppendLine($"   PartLevels: {FormatLevels(wizardLevels.Select(r => r.Level))}");
+                foreach (var level in wizardLevels)
+                {
+                    sb.AppendLine($"      Level {level.Level}: {level.RowCount} row(s), SortBalanced {Shorten(level.Sorts, 120)}");
+                }
+            }
+
+            var wizardLevelSet = wizardLevels.Select(r => r.Level).ToHashSet();
+            var missingWizardLevels = selectedLevels
+                .Where(r => r.RowCount > r.StockRows && r.Level > 0 && !wizardLevelSet.Contains(r.Level))
+                .Select(r => r.Level)
+                .Distinct()
+                .OrderBy(v => v)
+                .ToList();
+            if (missingWizardLevels.Count > 0)
+            {
+                findings.Add($"UpgradeWizardParts.{spec.PartName} is missing purchasable level(s) {FormatLevels(missingWizardLevels)}. Wire Menu now adds these rows.");
+            }
+            sb.AppendLine();
+        }
+
         if (aspirationSpec is not null)
         {
-            sb.AppendLine("4. Aspiration conversion chain");
+            sb.AppendLine("5. Aspiration conversion chain");
             var aspirationRow = AspirationProbeRow(aspirationSpec.AspirationId);
             if (string.IsNullOrWhiteSpace(aspirationRow))
             {
@@ -1103,13 +1143,13 @@ internal sealed class SqliteEditorService : IDisposable
             sb.AppendLine();
         }
 
-        sb.AppendLine("5. Result");
+        sb.AppendLine("6. Result");
         if (findings.Count == 0)
         {
             sb.AppendLine("   PASS: SQLite-side rows and metadata look complete for the selected engine/table.");
             if (observedMax.HasValue)
             {
-                sb.AppendLine($"   No selected row is above the base-data max {observedMax.Value}. To prove a cap, add a higher level, wire metadata, import, then check the game.");
+                sb.AppendLine($"   No selected row is above the base-data max upgrade level {observedMax.Value}. To prove a cap, add a higher level, wire metadata, import, then check the game.");
             }
         }
         else
@@ -1133,7 +1173,7 @@ internal sealed class SqliteEditorService : IDisposable
         {
             sb.AppendLine($"Engine stock AspirationID: {stockAspirationId.Value}");
         }
-        sb.AppendLine("Base-data max is only an inference from the shipped DB. A real cap is proven only after a higher level has complete metadata, is imported, and still does not show in-game.");
+        sb.AppendLine("Base-data max means max upgrade Level, not tile count. Stock is usually Level 0, so visible tiles can be stock + upgrade levels. A real cap is proven only after a higher level has complete metadata, is imported, and still does not show in-game.");
         sb.AppendLine();
 
         foreach (var table in EditorConstants.EnginePartTables.Where(TableExists))
@@ -1149,6 +1189,7 @@ internal sealed class SqliteEditorService : IDisposable
             var observedMax = EditorConstants.ObservedEnginePartMenuMaxLevel(table);
             var specs = UpgradePartSpecsForTable(table);
             var status = new List<string>();
+            var wizardPieces = new List<string>();
 
             if (selectedLevels.Count == 0)
             {
@@ -1187,6 +1228,20 @@ internal sealed class SqliteEditorService : IDisposable
                         status.Add($"duplicate metadata levels {FormatLevels(duplicateLevels)}");
                     }
                 }
+
+                var wizardLevels = UpgradeWizardPartProbeRows(spec.PartName);
+                wizardPieces.Add($"{spec.PartName}: {FormatLevels(wizardLevels.Select(r => r.Level))}");
+                var wizardSet = wizardLevels.Select(r => r.Level).ToHashSet();
+                var missingWizard = selectedLevels
+                    .Where(r => r.RowCount > r.StockRows && r.Level > 0 && !wizardSet.Contains(r.Level))
+                    .Select(r => r.Level)
+                    .Distinct()
+                    .OrderBy(v => v)
+                    .ToList();
+                if (missingWizard.Count > 0)
+                {
+                    status.Add($"missing UpgradeWizardParts levels {FormatLevels(missingWizard)}");
+                }
             }
 
             var duplicatePartLevels = selectedLevels.Where(r => r.RowCount > 1).Select(r => r.Level).Distinct().OrderBy(v => v).ToList();
@@ -1200,7 +1255,7 @@ internal sealed class SqliteEditorService : IDisposable
                 var above = selectedLevels.Where(r => r.Level > observedMax.Value).Select(r => r.Level).Distinct().OrderBy(v => v).ToList();
                 if (above.Count > 0)
                 {
-                    status.Add($"above base-data max {observedMax.Value}: {FormatLevels(above)}");
+                    status.Add($"above base-data max upgrade level {observedMax.Value}: {FormatLevels(above)}");
                 }
             }
 
@@ -1217,8 +1272,13 @@ internal sealed class SqliteEditorService : IDisposable
             sb.AppendLine(table);
             sb.AppendLine($"  selected rows: {FormatPartLevelRows(selectedLevels)}");
             sb.AppendLine($"  table-wide levels: {FormatLevels(ExistingLevelsForUpgradeTable(table))}");
-            sb.AppendLine($"  base-data max: {(observedMax.HasValue ? observedMax.Value.ToString(CultureInfo.InvariantCulture) : "unknown")}{aspirationText}");
+            sb.AppendLine($"  base-data max upgrade level: {(observedMax.HasValue ? observedMax.Value.ToString(CultureInfo.InvariantCulture) : "unknown")}{aspirationText}");
+            if (observedMax.HasValue)
+            {
+                sb.AppendLine($"  base-data expected visible tiles: {BaseVisibleTileText(observedMax.Value)}");
+            }
             sb.AppendLine($"  metadata: {(metadataPieces.Count == 0 ? "(none)" : string.Join("; ", metadataPieces))}");
+            sb.AppendLine($"  wizard levels: {(wizardPieces.Count == 0 ? "(none)" : string.Join("; ", wizardPieces))}");
             sb.AppendLine($"  status: {string.Join("; ", status.Distinct())}");
             sb.AppendLine();
         }
@@ -1308,6 +1368,32 @@ internal sealed class SqliteEditorService : IDisposable
         return rows;
     }
 
+    private IReadOnlyList<UpgradeWizardPartProbe> UpgradeWizardPartProbeRows(string partName)
+    {
+        if (!TableExists("UpgradeWizardParts"))
+        {
+            return [];
+        }
+
+        using var cmd = _connection.CreateCommand();
+        cmd.CommandText =
+            "SELECT CAST(PartLevel AS INTEGER) AS LevelValue, COUNT(*) AS RowCount, " +
+            "GROUP_CONCAT(CAST(SortBalanced AS TEXT), ',') " +
+            "FROM UpgradeWizardParts WHERE PartName=$partName " +
+            "GROUP BY CAST(PartLevel AS INTEGER) ORDER BY CAST(PartLevel AS INTEGER)";
+        cmd.Parameters.AddWithValue("$partName", partName);
+        using var reader = cmd.ExecuteReader();
+        var rows = new List<UpgradeWizardPartProbe>();
+        while (reader.Read())
+        {
+            rows.Add(new UpgradeWizardPartProbe(
+                Convert.ToInt64(reader.GetValue(0), CultureInfo.InvariantCulture),
+                Convert.ToInt64(reader.GetValue(1), CultureInfo.InvariantCulture),
+                reader.IsDBNull(2) ? "" : reader.GetString(2)));
+        }
+        return rows;
+    }
+
     private string UpgradeAreaLinksForType(long typeId)
     {
         if (!TableExists("UpgradeAreaForUpgradeType"))
@@ -1381,6 +1467,16 @@ internal sealed class SqliteEditorService : IDisposable
             var stock = row.StockRows > 0 ? " stock" : "";
             return $"L{row.Level}x{row.RowCount}{stock}";
         }));
+    }
+
+    private static string BaseVisibleTileText(long maxUpgradeLevel)
+    {
+        if (maxUpgradeLevel <= 0)
+        {
+            return "stock Level 0 only";
+        }
+
+        return $"Level 0 stock + Levels 1-{maxUpgradeLevel} upgrades = {maxUpgradeLevel + 1} tile(s) when stock is shown";
     }
 
     private static string Blank(string? value)
@@ -1457,6 +1553,71 @@ internal sealed class SqliteEditorService : IDisposable
                 var sourceId = Convert.ToInt64(reader.GetValue(idOrdinal), CultureInfo.InvariantCulture);
                 templates.Add((sourceTable, sourceId, EnginePartTemplateLabel(sourceTable, reader)));
             }
+        }
+        return templates;
+    }
+
+    public List<(string SourceTable, long SourceId, string Label)> AeroPartTemplates(string targetTable, long? carId)
+    {
+        if (!EditorConstants.AeroOptionTables.Contains(targetTable, StringComparer.OrdinalIgnoreCase) || !TableExists(targetTable))
+        {
+            return [];
+        }
+
+        var columns = GetColumns(targetTable).Select(c => c.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (!columns.Contains("Id"))
+        {
+            return [];
+        }
+
+        var linkColumn = targetTable.Equals("List_UpgradeRearWing", StringComparison.OrdinalIgnoreCase)
+            ? "Ordinal"
+            : "CarBodyID";
+        if (!columns.Contains(linkColumn))
+        {
+            return [];
+        }
+
+        long? target = null;
+        if (carId.HasValue)
+        {
+            try
+            {
+                target = AeroTarget(targetTable, carId.Value).Target;
+            }
+            catch
+            {
+                target = null;
+            }
+        }
+
+        var hasAeroPhysics = columns.Contains("AeroPhysicsID") && TableExists("List_AeroPhysics");
+        var isRearWing = targetTable.Equals("List_UpgradeRearWing", StringComparison.OrdinalIgnoreCase);
+        using var cmd = _connection.CreateCommand();
+        var sourceCarJoin = isRearWing
+            ? "LEFT JOIN Data_Car dc ON dc.Id = t.Ordinal "
+            : "LEFT JOIN List_UpgradeCarBody cb ON cb.CarBodyID = t.CarBodyID LEFT JOIN Data_Car dc ON dc.Id = cb.Ordinal ";
+        cmd.CommandText =
+            "SELECT t.*, dc.MediaName AS SourceCarName, dc.Year AS SourceCarYear, " +
+            (TableExists("List_CarMake") ? "mk.ManufacturerCode AS SourceMake, " : "NULL AS SourceMake, ") +
+            (hasAeroPhysics ? "ap.DefaultTuneSlider, ap.Drag0, ap.Downforce0, ap.Drag1, ap.Downforce1 " : "NULL AS DefaultTuneSlider, NULL AS Drag0, NULL AS Downforce0, NULL AS Drag1, NULL AS Downforce1 ") +
+            $"FROM {SqliteHelpers.Ident(targetTable)} t " +
+            sourceCarJoin +
+            (TableExists("List_CarMake") ? "LEFT JOIN List_CarMake mk ON mk.ID = dc.MakeID " : "") +
+            (hasAeroPhysics ? "LEFT JOIN List_AeroPhysics ap ON ap.AeroPhysicsID = t.AeroPhysicsID " : "") +
+            "ORDER BY " +
+            $"CASE WHEN $target >= 0 AND t.{SqliteHelpers.Ident(linkColumn)}=$target THEN 0 ELSE 1 END, " +
+            "CAST(COALESCE(t.IsStock, 0) AS INTEGER) ASC, " +
+            (hasAeroPhysics ? AeroPhysicsHasRangeSql("ap") + " DESC, " + AeroPhysicsAllZeroSql("ap") + " ASC, " : "") +
+            "CAST(COALESCE(t.Level, 0) AS INTEGER) DESC, CAST(COALESCE(t.Sequence, 0) AS INTEGER) DESC, t.Id DESC";
+        cmd.Parameters.AddWithValue("$target", target ?? -1);
+
+        var templates = new List<(string SourceTable, long SourceId, string Label)>();
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            var sourceId = Convert.ToInt64(reader.GetValue(reader.GetOrdinal("Id")), CultureInfo.InvariantCulture);
+            templates.Add((targetTable, sourceId, AeroPartTemplateLabel(targetTable, reader, hasAeroPhysics)));
         }
         return templates;
     }
@@ -1848,6 +2009,15 @@ internal sealed class SqliteEditorService : IDisposable
                UpgradePartSpecsForTable(table).Count > 0;
     }
 
+    public IReadOnlyList<string> UpgradePartNamesForTable(string table)
+    {
+        return UpgradePartSpecsForTable(table)
+            .Select(spec => spec.PartName)
+            .Where(partName => !string.IsNullOrWhiteSpace(partName))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
     public string EnsureMenuMetadataForTable(string table)
     {
         var specs = UpgradePartSpecsForTable(table);
@@ -1909,7 +2079,7 @@ internal sealed class SqliteEditorService : IDisposable
         AddLinkedOptionRow(table, link.LinkColumn, target.Value);
     }
 
-    public void AddLinkedAeroOption(string table, long carId)
+    public string AddLinkedAeroOption(string table, long carId, long? sourceId = null)
     {
         if (!EditorConstants.AeroOptionTables.Contains(table, StringComparer.OrdinalIgnoreCase))
         {
@@ -1917,7 +2087,424 @@ internal sealed class SqliteEditorService : IDisposable
         }
 
         var (linkColumn, target) = AeroTarget(table, carId);
-        AddLinkedOptionRow(table, linkColumn, target);
+        var result = AddAeroOptionRow(table, linkColumn, target, carId, sourceId);
+        var physics = result.AeroPhysicsId.HasValue
+            ? $", dedicated AeroPhysicsID {result.AeroPhysicsId.Value}"
+            : "";
+        return $"Added {table} Id {result.Id} Level {result.Level} Sequence {result.Sequence}{physics}. Menu metadata was wired for this aero table.";
+    }
+
+    private AeroOptionAddResult AddAeroOptionRow(string table, string linkColumn, long target, long carId, long? sourceId)
+    {
+        if (!TableExists(table))
+        {
+            throw new InvalidOperationException($"Table does not exist: {table}");
+        }
+
+        var columns = GetColumns(table);
+        var names = columns.Select(c => c.Name).ToList();
+        if (!names.Contains("Id", StringComparer.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException($"{table} needs an Id column to add aero options.");
+        }
+        var actualLinkColumn = names.FirstOrDefault(c => c.Equals(linkColumn, StringComparison.OrdinalIgnoreCase));
+        if (actualLinkColumn is null)
+        {
+            throw new InvalidOperationException($"{table} does not have link column {linkColumn}.");
+        }
+
+        var source = sourceId.HasValue
+            ? SourceAeroRowById(table, names, "Id", sourceId.Value)
+            : SourceAeroRowForClone(table, names, "Id", actualLinkColumn, target);
+        if (source.Count == 0)
+        {
+            throw new InvalidOperationException(sourceId.HasValue
+                ? $"Selected aero template Id {sourceId.Value} does not exist in {table}."
+                : $"No source rows exist in {table}.");
+        }
+
+        var row = CloneOrDefaultRow(columns, source);
+        var id = NextLinkedOptionId(table, "Id", actualLinkColumn, target, carId);
+        var sourceLevel = ToLongOrZero(source.GetValueOrDefault("Level"));
+        var level = names.Contains("Level", StringComparer.OrdinalIgnoreCase)
+            ? sourceLevel > 0
+                ? sourceLevel
+                : MaxInt(table, "Level", $"{SqliteHelpers.Ident(actualLinkColumn)}=$target", ("$target", target)) + 1
+            : 0;
+        var sequence = names.Contains("Sequence", StringComparer.OrdinalIgnoreCase)
+            ? MaxInt(table, "Sequence", $"{SqliteHelpers.Ident(actualLinkColumn)}=$target", ("$target", target)) + 1
+            : 0;
+
+        row["Id"] = id;
+        row[actualLinkColumn] = target;
+        if (names.Contains("IsStock", StringComparer.OrdinalIgnoreCase))
+        {
+            row["IsStock"] = 0;
+        }
+        if (names.Contains("Level", StringComparer.OrdinalIgnoreCase))
+        {
+            row["Level"] = level;
+        }
+        if (names.Contains("Sequence", StringComparer.OrdinalIgnoreCase))
+        {
+            row["Sequence"] = sequence;
+        }
+        if (names.Contains("RequiresGraphics", StringComparer.OrdinalIgnoreCase))
+        {
+            row["RequiresGraphics"] = 1;
+        }
+        if (names.Contains("Price", StringComparer.OrdinalIgnoreCase) && ToLongOrZero(row.GetValueOrDefault("Price")) <= 0)
+        {
+            row["Price"] = 1000;
+        }
+
+        long? aeroPhysicsId = null;
+        if (names.Contains("AeroPhysicsID", StringComparer.OrdinalIgnoreCase) && TableExists("List_AeroPhysics"))
+        {
+            aeroPhysicsId = CreateDedicatedAeroPhysicsRow(
+                table,
+                actualLinkColumn,
+                target,
+                carId,
+                row.GetValueOrDefault("AeroPhysicsID"),
+                preferCurrentPhysics: sourceId.HasValue);
+            if (aeroPhysicsId.HasValue)
+            {
+                row["AeroPhysicsID"] = aeroPhysicsId.Value;
+            }
+        }
+
+        InsertDictionaryRow(table, names, row);
+        if (names.Contains("Level", StringComparer.OrdinalIgnoreCase))
+        {
+            TryEnsureMenuMetadataForTableLevels(table, ExistingLevelsForUpgradeTable(table));
+        }
+
+        return new AeroOptionAddResult(id, level, sequence, aeroPhysicsId);
+    }
+
+    private Dictionary<string, object?> SourceAeroRowForClone(
+        string table,
+        IReadOnlyList<string> columns,
+        string pk,
+        string linkColumn,
+        long target)
+    {
+        var sameTarget = SourceAeroRowForClone(table, columns, pk, $"{SqliteHelpers.Ident("t")}.{SqliteHelpers.Ident(linkColumn)}=$target", ("$target", target));
+        if (sameTarget.Count > 0)
+        {
+            return sameTarget;
+        }
+
+        return SourceAeroRowForClone(table, columns, pk, "1=1", null);
+    }
+
+    private Dictionary<string, object?> SourceAeroRowById(
+        string table,
+        IReadOnlyList<string> columns,
+        string pk,
+        long sourceId)
+    {
+        using var cmd = _connection.CreateCommand();
+        cmd.CommandText =
+            $"SELECT * FROM {SqliteHelpers.Ident(table)} " +
+            $"WHERE {SqliteHelpers.Ident(pk)}=$id LIMIT 1";
+        cmd.Parameters.AddWithValue("$id", sourceId);
+        return ReadFirstRow(cmd, columns);
+    }
+
+    private Dictionary<string, object?> SourceAeroRowForClone(
+        string table,
+        IReadOnlyList<string> columns,
+        string pk,
+        string where,
+        (string Name, object Value)? parameter)
+    {
+        var hasAeroPhysics = columns.Contains("AeroPhysicsID", StringComparer.OrdinalIgnoreCase) && TableExists("List_AeroPhysics");
+        var order = new List<string>();
+        if (columns.Contains("IsStock", StringComparer.OrdinalIgnoreCase))
+        {
+            order.Add($"CAST(COALESCE({SqliteHelpers.Ident("t")}.{SqliteHelpers.Ident("IsStock")}, 0) AS INTEGER) ASC");
+        }
+        if (columns.Contains("RequiresGraphics", StringComparer.OrdinalIgnoreCase))
+        {
+            order.Add($"CAST(COALESCE({SqliteHelpers.Ident("t")}.{SqliteHelpers.Ident("RequiresGraphics")}, 0) AS INTEGER) DESC");
+        }
+        if (hasAeroPhysics)
+        {
+            order.Add(AeroPhysicsAllZeroSql("ap") + " ASC");
+            order.Add(AeroPhysicsHasRangeSql("ap") + " DESC");
+            order.Add(AeroPhysicsHasSliderCurveSql("ap") + " DESC");
+        }
+        if (columns.Contains("Level", StringComparer.OrdinalIgnoreCase))
+        {
+            order.Add($"CAST(COALESCE({SqliteHelpers.Ident("t")}.{SqliteHelpers.Ident("Level")}, 0) AS INTEGER) DESC");
+        }
+        if (columns.Contains("Sequence", StringComparer.OrdinalIgnoreCase))
+        {
+            order.Add($"CAST(COALESCE({SqliteHelpers.Ident("t")}.{SqliteHelpers.Ident("Sequence")}, 0) AS INTEGER) DESC");
+        }
+        order.Add($"{SqliteHelpers.Ident("t")}.{SqliteHelpers.Ident(pk)} DESC");
+
+        using var cmd = _connection.CreateCommand();
+        cmd.CommandText =
+            $"SELECT {SqliteHelpers.Ident("t")}.* FROM {SqliteHelpers.Ident(table)} {SqliteHelpers.Ident("t")} " +
+            (hasAeroPhysics
+                ? $"LEFT JOIN {SqliteHelpers.Ident("List_AeroPhysics")} ap ON ap.AeroPhysicsID = {SqliteHelpers.Ident("t")}.{SqliteHelpers.Ident("AeroPhysicsID")} "
+                : "") +
+            $"WHERE {where} ORDER BY {string.Join(", ", order)} LIMIT 1";
+        if (parameter.HasValue)
+        {
+            cmd.Parameters.AddWithValue(parameter.Value.Name, parameter.Value.Value);
+        }
+        return ReadFirstRow(cmd, columns);
+    }
+
+    private long NextLinkedOptionId(string table, string pk, string linkColumn, long target, long carId)
+    {
+        var currentMax = MaxInt(table, pk, $"{SqliteHelpers.Ident(linkColumn)}=$target", ("$target", target));
+        long candidate;
+        if (currentMax > 0)
+        {
+            candidate = currentMax + 1;
+        }
+        else
+        {
+            try
+            {
+                candidate = linkColumn.Equals("Ordinal", StringComparison.OrdinalIgnoreCase)
+                    ? checked(carId * 1000)
+                    : target;
+            }
+            catch (OverflowException)
+            {
+                candidate = NextId(table, pk);
+            }
+        }
+
+        while (ColumnValueExists(table, pk, candidate))
+        {
+            candidate++;
+        }
+        return candidate;
+    }
+
+    private long? CreateDedicatedAeroPhysicsRow(
+        string optionTable,
+        string linkColumn,
+        long target,
+        long carId,
+        object? currentPhysicsId,
+        bool preferCurrentPhysics)
+    {
+        var source = BestAeroPhysicsForOption(optionTable, linkColumn, target, currentPhysicsId, preferCurrentPhysics);
+        if (source is null || source.Count == 0)
+        {
+            return null;
+        }
+
+        var columns = GetColumns("List_AeroPhysics");
+        var names = columns.Select(c => c.Name).ToList();
+        var row = CloneOrDefaultRow(columns, source);
+        var newId = NextAeroPhysicsId(carId);
+        row["AeroPhysicsID"] = newId;
+        if (names.Contains("Ordinal", StringComparer.OrdinalIgnoreCase))
+        {
+            row["Ordinal"] = carId;
+        }
+        EnsureUsableAeroPhysicsDefaults(row);
+        InsertDictionaryRow("List_AeroPhysics", names, row);
+        return newId;
+    }
+
+    private Dictionary<string, object?>? BestAeroPhysicsForOption(
+        string optionTable,
+        string linkColumn,
+        long target,
+        object? currentPhysicsId,
+        bool preferCurrentPhysics)
+    {
+        var current = ReadAeroPhysicsById(ToLongOrZero(currentPhysicsId));
+        if (preferCurrentPhysics && current is not null && !AeroPhysicsAllZero(current))
+        {
+            return current;
+        }
+
+        var sameTarget = BestAeroPhysicsFromOptionRows(
+            optionTable,
+            $"{SqliteHelpers.Ident("t")}.{SqliteHelpers.Ident(linkColumn)}=$target",
+            ("$target", target));
+        if (sameTarget is not null && !AeroPhysicsAllZero(sameTarget))
+        {
+            return sameTarget;
+        }
+
+        if (current is not null && !AeroPhysicsAllZero(current))
+        {
+            return current;
+        }
+
+        var tableWide = BestAeroPhysicsFromOptionRows(optionTable, "1=1", null);
+        if (tableWide is not null && !AeroPhysicsAllZero(tableWide))
+        {
+            return tableWide;
+        }
+
+        return current;
+    }
+
+    private Dictionary<string, object?>? BestAeroPhysicsFromOptionRows(
+        string optionTable,
+        string where,
+        (string Name, object Value)? parameter)
+    {
+        var columns = GetColumns("List_AeroPhysics").Select(c => c.Name).ToList();
+        using var cmd = _connection.CreateCommand();
+        cmd.CommandText =
+            $"SELECT ap.* FROM {SqliteHelpers.Ident(optionTable)} {SqliteHelpers.Ident("t")} " +
+            $"JOIN {SqliteHelpers.Ident("List_AeroPhysics")} ap ON ap.AeroPhysicsID = {SqliteHelpers.Ident("t")}.{SqliteHelpers.Ident("AeroPhysicsID")} " +
+            $"WHERE {where} " +
+            "ORDER BY " +
+            AeroPhysicsAllZeroSql("ap") + " ASC, " +
+            AeroPhysicsHasRangeSql("ap") + " DESC, " +
+            AeroPhysicsHasSliderCurveSql("ap") + " DESC, " +
+            $"CAST(COALESCE({SqliteHelpers.Ident("t")}.{SqliteHelpers.Ident("IsStock")}, 0) AS INTEGER) ASC, " +
+            $"CAST(COALESCE({SqliteHelpers.Ident("t")}.{SqliteHelpers.Ident("Level")}, 0) AS INTEGER) DESC, " +
+            $"CAST(COALESCE({SqliteHelpers.Ident("t")}.{SqliteHelpers.Ident("Sequence")}, 0) AS INTEGER) DESC, " +
+            $"{SqliteHelpers.Ident("t")}.{SqliteHelpers.Ident("Id")} DESC LIMIT 1";
+        if (parameter.HasValue)
+        {
+            cmd.Parameters.AddWithValue(parameter.Value.Name, parameter.Value.Value);
+        }
+        var row = ReadFirstRow(cmd, columns);
+        return row.Count == 0 ? null : row;
+    }
+
+    private Dictionary<string, object?>? ReadAeroPhysicsById(long aeroPhysicsId)
+    {
+        if (aeroPhysicsId <= 0 || !TableExists("List_AeroPhysics"))
+        {
+            return null;
+        }
+
+        var columns = GetColumns("List_AeroPhysics").Select(c => c.Name).ToList();
+        using var cmd = _connection.CreateCommand();
+        cmd.CommandText = "SELECT * FROM List_AeroPhysics WHERE AeroPhysicsID=$id LIMIT 1";
+        cmd.Parameters.AddWithValue("$id", aeroPhysicsId);
+        var row = ReadFirstRow(cmd, columns);
+        return row.Count == 0 ? null : row;
+    }
+
+    private long NextAeroPhysicsId(long carId)
+    {
+        var existingForCar = MaxInt("List_AeroPhysics", "AeroPhysicsID", "Ordinal=$carId", ("$carId", carId));
+        long candidate;
+        if (existingForCar > 0)
+        {
+            candidate = existingForCar + 1;
+        }
+        else
+        {
+            try
+            {
+                candidate = checked(carId * 1000 + 901);
+            }
+            catch (OverflowException)
+            {
+                candidate = NextId("List_AeroPhysics", "AeroPhysicsID");
+            }
+        }
+
+        while (ColumnValueExists("List_AeroPhysics", "AeroPhysicsID", candidate))
+        {
+            candidate++;
+        }
+        return candidate;
+    }
+
+    private static string AeroPhysicsAllZeroSql(string alias)
+    {
+        string c(string column) => $"{alias}.{SqliteHelpers.Ident(column)}";
+        return "(CASE WHEN " +
+               string.Join(" AND ", AeroPhysicsEffectColumns().Select(column => $"COALESCE({c(column)}, 0)=0")) +
+               " THEN 1 ELSE 0 END)";
+    }
+
+    private static string AeroPhysicsHasRangeSql(string alias)
+    {
+        return "(CASE WHEN " +
+               $"COALESCE({alias}.{SqliteHelpers.Ident("Drag0")}, 0)<>COALESCE({alias}.{SqliteHelpers.Ident("Drag1")}, 0) OR " +
+               $"COALESCE({alias}.{SqliteHelpers.Ident("Downforce0")}, 0)<>COALESCE({alias}.{SqliteHelpers.Ident("Downforce1")}, 0) " +
+               "THEN 1 ELSE 0 END)";
+    }
+
+    private static string AeroPhysicsHasSliderCurveSql(string alias)
+    {
+        return "(CASE WHEN " +
+               $"COALESCE({alias}.{SqliteHelpers.Ident("DefaultTuneSlider")}, 0)<>0 AND " +
+               $"COALESCE({alias}.{SqliteHelpers.Ident("DFTorqueScaleOneSliderInput1")}, 0)=0.5 AND " +
+               $"COALESCE({alias}.{SqliteHelpers.Ident("DFTorqueScaleOneSliderInput2")}, 0)=1 AND " +
+               $"COALESCE({alias}.{SqliteHelpers.Ident("DFTorqueScaleOneTorqueScaleOutput2")}, 0)=1 AND " +
+               $"COALESCE({alias}.{SqliteHelpers.Ident("DFTorqueScaleTwoSliderInput1")}, 0)=0.5 AND " +
+               $"COALESCE({alias}.{SqliteHelpers.Ident("DFTorqueScaleTwoSliderInput2")}, 0)=1 AND " +
+               $"COALESCE({alias}.{SqliteHelpers.Ident("DFTorqueScaleTwoTorqueScaleOutput0")}, 0)=1 AND " +
+               $"COALESCE({alias}.{SqliteHelpers.Ident("DFTorqueScaleTwoTorqueScaleOutput1")}, 0)=1 AND " +
+               $"COALESCE({alias}.{SqliteHelpers.Ident("DFTorqueScaleTwoTorqueScaleOutput2")}, 0)=1 " +
+               "THEN 1 ELSE 0 END)";
+    }
+
+    private static IReadOnlyList<string> AeroPhysicsEffectColumns() =>
+    [
+        "DefaultTuneSlider",
+        "Drag0",
+        "Downforce0",
+        "Drag1",
+        "Downforce1",
+        "AngleZeroDownforce",
+        "LateralDrag",
+        "DFTorqueScaleOneSliderInput0",
+        "DFTorqueScaleOneSliderInput1",
+        "DFTorqueScaleOneSliderInput2",
+        "DFTorqueScaleOneTorqueScaleOutput0",
+        "DFTorqueScaleOneTorqueScaleOutput1",
+        "DFTorqueScaleOneTorqueScaleOutput2",
+        "DFTorqueScaleTwoSliderInput0",
+        "DFTorqueScaleTwoSliderInput1",
+        "DFTorqueScaleTwoSliderInput2",
+        "DFTorqueScaleTwoTorqueScaleOutput0",
+        "DFTorqueScaleTwoTorqueScaleOutput1",
+        "DFTorqueScaleTwoTorqueScaleOutput2",
+        "DownforceOffThrottleOffset",
+        "DragOffThrottleOffset",
+        "DownforceBrakingOffset",
+        "DragBrakingOffset"
+    ];
+
+    private static bool AeroPhysicsAllZero(IReadOnlyDictionary<string, object?> row)
+    {
+        return AeroPhysicsEffectColumns().All(column => Math.Abs(ToDoubleOrZero(row.GetValueOrDefault(column))) < 0.000001);
+    }
+
+    private static void EnsureUsableAeroPhysicsDefaults(IDictionary<string, object?> row)
+    {
+        row.TryGetValue("DefaultTuneSlider", out var defaultTuneSlider);
+        if (ToDoubleOrZero(defaultTuneSlider) <= 0)
+        {
+            row["DefaultTuneSlider"] = 0.5;
+        }
+
+        row["DFTorqueScaleOneSliderInput0"] = 0.0;
+        row["DFTorqueScaleOneSliderInput1"] = 0.5;
+        row["DFTorqueScaleOneSliderInput2"] = 1.0;
+        row["DFTorqueScaleOneTorqueScaleOutput0"] = 0.0;
+        row["DFTorqueScaleOneTorqueScaleOutput1"] = 0.0;
+        row["DFTorqueScaleOneTorqueScaleOutput2"] = 1.0;
+        row["DFTorqueScaleTwoSliderInput0"] = 0.0;
+        row["DFTorqueScaleTwoSliderInput1"] = 0.5;
+        row["DFTorqueScaleTwoSliderInput2"] = 1.0;
+        row["DFTorqueScaleTwoTorqueScaleOutput0"] = 1.0;
+        row["DFTorqueScaleTwoTorqueScaleOutput1"] = 1.0;
+        row["DFTorqueScaleTwoTorqueScaleOutput2"] = 1.0;
     }
 
     private void AddLinkedOptionRow(string table, string linkColumn, long target)
@@ -2003,6 +2590,7 @@ internal sealed class SqliteEditorService : IDisposable
             EnsureUpgradeAreaLinks(typeId, fallbackTypeId, spec.CategoryName, changes);
             EnsureUpgradeRowsForLevels(spec.PartName, typeId, fallbackTypeId, levels, changes);
         }
+        EnsureUpgradeWizardPartLevels(spec.PartName, fallbackPartName, levels, changes);
 
         if (aspirationSpec is not null && aspirationSpec.PartName.Equals(spec.PartName, StringComparison.OrdinalIgnoreCase))
         {
@@ -2096,6 +2684,7 @@ internal sealed class SqliteEditorService : IDisposable
         {
             if (UpgradeLevelExists(typeId, level))
             {
+                RepairFallbackCopiedUpgradeLevel(partName, typeId, fallbackTypeId, level, changes);
                 continue;
             }
 
@@ -2140,6 +2729,242 @@ internal sealed class SqliteEditorService : IDisposable
         row["SortOrder"] = level;
         InsertDictionaryRow("Upgrades", names, row);
         changes.Add($"{partName} level {level}");
+    }
+
+    private void RepairFallbackCopiedUpgradeLevel(string partName, long typeId, long? fallbackTypeId, long level, List<string> changes)
+    {
+        if (!fallbackTypeId.HasValue || level <= 0)
+        {
+            return;
+        }
+
+        var fallback = ReadUpgradeRowForClone(
+            "CAST(TypeId AS INTEGER)=$typeId AND CAST(Level AS INTEGER)=$level",
+            fallbackTypeId.Value,
+            level);
+        if (fallback is null)
+        {
+            return;
+        }
+
+        var source =
+            ReadUpgradeRowForClone("CAST(TypeId AS INTEGER)=$typeId AND CAST(Level AS INTEGER)<$level", typeId, level) ??
+            ReadUpgradeRowForClone("CAST(TypeId AS INTEGER)=$typeId", typeId, null);
+        if (source is null || UpgradeDisplayMatches(source, fallback))
+        {
+            return;
+        }
+
+        var currentRows = ReadUpgradeRowsForTypeLevel(typeId, level);
+
+        var repaired = 0;
+        foreach (var row in currentRows)
+        {
+            if (!UpgradeDisplayMatches(row, fallback) || UpgradeDisplayMatches(row, source))
+            {
+                continue;
+            }
+
+            UpdateUpgradeDisplay(row, source, level);
+            repaired++;
+        }
+
+        if (repaired > 0)
+        {
+            changes.Add($"{partName} level {level} display repaired");
+        }
+    }
+
+    private void UpdateUpgradeDisplay(IReadOnlyDictionary<string, object?> target, IReadOnlyDictionary<string, object?> source, long level)
+    {
+        if (!target.TryGetValue("id", out var id))
+        {
+            return;
+        }
+
+        using var cmd = _connection.CreateCommand();
+        cmd.CommandText =
+            "UPDATE Upgrades SET Name=$name, Description=$description, IconPath=$icon, ImagePath=$image, SortOrder=$sortOrder " +
+            "WHERE id=$id";
+        cmd.Parameters.AddWithValue("$name", DbValue(source, "Name"));
+        cmd.Parameters.AddWithValue("$description", DbValue(source, "Description"));
+        cmd.Parameters.AddWithValue("$icon", DbValue(source, "IconPath"));
+        cmd.Parameters.AddWithValue("$image", DbValue(source, "ImagePath"));
+        cmd.Parameters.AddWithValue("$sortOrder", level);
+        cmd.Parameters.AddWithValue("$id", id);
+        cmd.ExecuteNonQuery();
+    }
+
+    private List<Dictionary<string, object?>> ReadUpgradeRowsForTypeLevel(long typeId, long level)
+    {
+        var columns = GetColumns("Upgrades").Select(c => c.Name).ToList();
+        using var cmd = _connection.CreateCommand();
+        cmd.CommandText =
+            "SELECT * FROM Upgrades WHERE CAST(TypeId AS INTEGER)=$typeId AND CAST(Level AS INTEGER)=$level ORDER BY id";
+        cmd.Parameters.AddWithValue("$typeId", typeId);
+        cmd.Parameters.AddWithValue("$level", level);
+        using var reader = cmd.ExecuteReader();
+        var rows = new List<Dictionary<string, object?>>();
+        while (reader.Read())
+        {
+            var row = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+            foreach (var column in columns)
+            {
+                row[column] = SqliteHelpers.ReaderValue(reader, reader.GetOrdinal(column));
+            }
+            rows.Add(row);
+        }
+        return rows;
+    }
+
+    private static bool UpgradeDisplayMatches(IReadOnlyDictionary<string, object?> row, IReadOnlyDictionary<string, object?> source)
+    {
+        var compared = 0;
+        var matched = 0;
+        foreach (var column in new[] { "Name", "Description", "IconPath", "ImagePath" })
+        {
+            var left = ValueText(row, column);
+            var right = ValueText(source, column);
+            if (string.IsNullOrWhiteSpace(left) || string.IsNullOrWhiteSpace(right))
+            {
+                continue;
+            }
+
+            compared++;
+            if (left.Equals(right, StringComparison.OrdinalIgnoreCase))
+            {
+                matched++;
+            }
+        }
+
+        return compared > 0 && (matched >= Math.Min(2, compared) ||
+                                ValueText(row, "IconPath").Equals(ValueText(source, "IconPath"), StringComparison.OrdinalIgnoreCase) ||
+                                ValueText(row, "ImagePath").Equals(ValueText(source, "ImagePath"), StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static object DbValue(IReadOnlyDictionary<string, object?> row, string column)
+    {
+        return row.TryGetValue(column, out var value) && value is not null ? value : DBNull.Value;
+    }
+
+    private static string ValueText(IReadOnlyDictionary<string, object?> row, string column)
+    {
+        return row.TryGetValue(column, out var value) ? ValueAsString(value) ?? "" : "";
+    }
+
+    private void EnsureUpgradeWizardPartLevels(string partName, string? fallbackPartName, IReadOnlyCollection<long> levels, List<string> changes)
+    {
+        if (!TableExists("UpgradeWizardParts"))
+        {
+            return;
+        }
+
+        var columns = GetColumns("UpgradeWizardParts");
+        var names = columns.Select(c => c.Name).ToList();
+        if (!names.Contains("PartName", StringComparer.OrdinalIgnoreCase) ||
+            !names.Contains("PartLevel", StringComparer.OrdinalIgnoreCase) ||
+            !names.Contains("SortBalanced", StringComparer.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        var added = new List<long>();
+        foreach (var level in levels.Where(level => level > 0).Distinct().OrderBy(v => v))
+        {
+            if (UpgradeWizardPartLevelExists(partName, level))
+            {
+                continue;
+            }
+
+            var row = CloneOrDefaultRow(columns, new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase));
+            row["PartName"] = partName;
+            row["PartLevel"] = level;
+            row["SortBalanced"] = SortBalancedForWizardPartLevel(partName, fallbackPartName, level);
+            InsertDictionaryRow("UpgradeWizardParts", names, row);
+            added.Add(level);
+        }
+
+        if (added.Count > 0)
+        {
+            changes.Add($"UpgradeWizardParts.{partName} levels {FormatLevels(added)}");
+        }
+    }
+
+    private bool UpgradeWizardPartLevelExists(string partName, long level)
+    {
+        using var cmd = _connection.CreateCommand();
+        cmd.CommandText =
+            "SELECT 1 FROM UpgradeWizardParts WHERE PartName=$partName AND CAST(PartLevel AS INTEGER)=$level LIMIT 1";
+        cmd.Parameters.AddWithValue("$partName", partName);
+        cmd.Parameters.AddWithValue("$level", level);
+        return cmd.ExecuteScalar() is not null;
+    }
+
+    private long SortBalancedForWizardPartLevel(string partName, string? fallbackPartName, long level)
+    {
+        var samePart = WizardSortForPartLevel(partName, level);
+        if (samePart.HasValue)
+        {
+            return samePart.Value;
+        }
+
+        if (!string.IsNullOrWhiteSpace(fallbackPartName))
+        {
+            var fallbackExact = WizardSortForPartLevel(fallbackPartName, level);
+            if (fallbackExact.HasValue)
+            {
+                return fallbackExact.Value;
+            }
+        }
+
+        var sameNearest = NearestWizardSort(partName, level);
+        if (sameNearest.HasValue)
+        {
+            return sameNearest.Value.Sort + Math.Max(1, level - sameNearest.Value.Level);
+        }
+
+        if (!string.IsNullOrWhiteSpace(fallbackPartName))
+        {
+            var fallbackNearest = NearestWizardSort(fallbackPartName, level);
+            if (fallbackNearest.HasValue)
+            {
+                return fallbackNearest.Value.Sort + Math.Max(1, level - fallbackNearest.Value.Level);
+            }
+        }
+
+        return MaxInt("UpgradeWizardParts", "SortBalanced") + 1;
+    }
+
+    private long? WizardSortForPartLevel(string partName, long level)
+    {
+        using var cmd = _connection.CreateCommand();
+        cmd.CommandText =
+            "SELECT CAST(SortBalanced AS INTEGER) FROM UpgradeWizardParts " +
+            "WHERE PartName=$partName AND CAST(PartLevel AS INTEGER)=$level " +
+            "ORDER BY CAST(SortBalanced AS INTEGER) LIMIT 1";
+        cmd.Parameters.AddWithValue("$partName", partName);
+        cmd.Parameters.AddWithValue("$level", level);
+        var value = cmd.ExecuteScalar();
+        return value is null or DBNull ? null : Convert.ToInt64(value, CultureInfo.InvariantCulture);
+    }
+
+    private (long Level, long Sort)? NearestWizardSort(string partName, long level)
+    {
+        using var cmd = _connection.CreateCommand();
+        cmd.CommandText =
+            "SELECT CAST(PartLevel AS INTEGER), CAST(SortBalanced AS INTEGER) FROM UpgradeWizardParts " +
+            "WHERE PartName=$partName ORDER BY ABS(CAST(PartLevel AS INTEGER)-$level), CAST(PartLevel AS INTEGER) DESC LIMIT 1";
+        cmd.Parameters.AddWithValue("$partName", partName);
+        cmd.Parameters.AddWithValue("$level", level);
+        using var reader = cmd.ExecuteReader();
+        if (!reader.Read())
+        {
+            return null;
+        }
+
+        return (
+            Convert.ToInt64(reader.GetValue(0), CultureInfo.InvariantCulture),
+            Convert.ToInt64(reader.GetValue(1), CultureInfo.InvariantCulture));
     }
 
     private void EnsureAspirationConversionRow(AspirationPartSpec spec, List<string> changes)
@@ -2424,10 +3249,10 @@ internal sealed class SqliteEditorService : IDisposable
     private Dictionary<string, object?> ReadUpgradeRowForLevelClone(long typeId, long? fallbackTypeId, long level)
     {
         return ReadUpgradeRowForClone("CAST(TypeId AS INTEGER)=$typeId AND CAST(Level AS INTEGER)=$level", typeId, level)
-               ?? (fallbackTypeId.HasValue ? ReadUpgradeRowForClone("CAST(TypeId AS INTEGER)=$typeId AND CAST(Level AS INTEGER)=$level", fallbackTypeId.Value, level) : null)
                ?? ReadUpgradeRowForClone("CAST(TypeId AS INTEGER)=$typeId AND CAST(Level AS INTEGER)<=$level", typeId, level)
-               ?? (fallbackTypeId.HasValue ? ReadUpgradeRowForClone("CAST(TypeId AS INTEGER)=$typeId AND CAST(Level AS INTEGER)<=$level", fallbackTypeId.Value, level) : null)
                ?? ReadUpgradeRowForClone("CAST(TypeId AS INTEGER)=$typeId", typeId, null)
+               ?? (fallbackTypeId.HasValue ? ReadUpgradeRowForClone("CAST(TypeId AS INTEGER)=$typeId AND CAST(Level AS INTEGER)=$level", fallbackTypeId.Value, level) : null)
+               ?? (fallbackTypeId.HasValue ? ReadUpgradeRowForClone("CAST(TypeId AS INTEGER)=$typeId AND CAST(Level AS INTEGER)<=$level", fallbackTypeId.Value, level) : null)
                ?? (fallbackTypeId.HasValue ? ReadUpgradeRowForClone("CAST(TypeId AS INTEGER)=$typeId", fallbackTypeId.Value, null) : null)
                ?? new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
     }
@@ -3018,6 +3843,22 @@ internal sealed class SqliteEditorService : IDisposable
         }
     }
 
+    private static double ToDoubleOrZero(object? value)
+    {
+        if (value is null || value == DBNull.Value)
+        {
+            return 0;
+        }
+        try
+        {
+            return Convert.ToDouble(value, CultureInfo.InvariantCulture);
+        }
+        catch
+        {
+            return 0;
+        }
+    }
+
     private static string EnginePartTemplateLabel(string sourceTable, SqliteDataReader reader)
     {
         var pieces = new List<string> { sourceTable.Replace("List_UpgradeEngine", "", StringComparison.OrdinalIgnoreCase) };
@@ -3050,6 +3891,80 @@ internal sealed class SqliteEditorService : IDisposable
             pieces.Add($"Id {reader.GetValue(idOrdinal)}");
         }
         return string.Join(" | ", pieces.Where(p => !string.IsNullOrWhiteSpace(p)));
+    }
+
+    private static string AeroPartTemplateLabel(string sourceTable, SqliteDataReader reader, bool hasAeroPhysics)
+    {
+        var pieces = new List<string> { HumanizeAeroPartTable(sourceTable) };
+        if (TryGetOrdinal(reader, "SourceCarYear", out var yearOrdinal) && !reader.IsDBNull(yearOrdinal))
+        {
+            pieces.Add(Convert.ToString(reader.GetValue(yearOrdinal), CultureInfo.InvariantCulture) ?? "");
+        }
+        if (TryGetOrdinal(reader, "SourceMake", out var makeOrdinal) && !reader.IsDBNull(makeOrdinal))
+        {
+            pieces.Add(reader.GetString(makeOrdinal));
+        }
+        if (TryGetOrdinal(reader, "SourceCarName", out var carOrdinal) && !reader.IsDBNull(carOrdinal))
+        {
+            pieces.Add(reader.GetString(carOrdinal));
+        }
+        if (TryGetOrdinal(reader, "Level", out var levelOrdinal))
+        {
+            pieces.Add($"Level {reader.GetValue(levelOrdinal)}");
+        }
+        if (TryGetOrdinal(reader, "IsStock", out var stockOrdinal) && !reader.IsDBNull(stockOrdinal) &&
+            Convert.ToInt64(reader.GetValue(stockOrdinal), CultureInfo.InvariantCulture) != 0)
+        {
+            pieces.Add("stock");
+        }
+        if (TryGetOrdinal(reader, "RequiresGraphics", out var graphicsOrdinal) && !reader.IsDBNull(graphicsOrdinal) &&
+            Convert.ToInt64(reader.GetValue(graphicsOrdinal), CultureInfo.InvariantCulture) == 0)
+        {
+            pieces.Add("no graphics");
+        }
+        if (hasAeroPhysics)
+        {
+            var hasRange = TryReadDouble(reader, "Drag0", out var drag0) &&
+                           TryReadDouble(reader, "Drag1", out var drag1) &&
+                           TryReadDouble(reader, "Downforce0", out var downforce0) &&
+                           TryReadDouble(reader, "Downforce1", out var downforce1) &&
+                           (Math.Abs(drag0 - drag1) > 0.000001 || Math.Abs(downforce0 - downforce1) > 0.000001);
+            pieces.Add(hasRange ? "aero range" : "fixed aero");
+        }
+        if (TryGetOrdinal(reader, "Price", out var priceOrdinal) && !reader.IsDBNull(priceOrdinal))
+        {
+            pieces.Add($"CR {reader.GetValue(priceOrdinal)}");
+        }
+        if (TryGetOrdinal(reader, "Id", out var idOrdinal))
+        {
+            pieces.Add($"Id {reader.GetValue(idOrdinal)}");
+        }
+        return string.Join(" | ", pieces.Where(p => !string.IsNullOrWhiteSpace(p)));
+    }
+
+    private static bool TryReadDouble(SqliteDataReader reader, string column, out double value)
+    {
+        if (TryGetOrdinal(reader, column, out var ordinal) && !reader.IsDBNull(ordinal))
+        {
+            value = Convert.ToDouble(reader.GetValue(ordinal), CultureInfo.InvariantCulture);
+            return true;
+        }
+
+        value = 0;
+        return false;
+    }
+
+    private static string HumanizeAeroPartTable(string table)
+    {
+        return table switch
+        {
+            "List_UpgradeRearWing" => "Rear Wing",
+            "List_UpgradeCarBodyFrontBumper" => "Front Bumper",
+            "List_UpgradeCarBodyRearBumper" => "Rear Bumper",
+            "List_UpgradeCarBodyHood" => "Hood",
+            "List_UpgradeCarBodySideSkirt" => "Side Skirts",
+            _ => table
+        };
     }
 
     private static string HumanizePartName(string partName)

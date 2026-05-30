@@ -25,6 +25,7 @@ public partial class MainWindow : Window
     private bool _loadingTableChoices;
     private bool _loadingEngineTools;
     private bool _loadingPartTools;
+    private bool _loadingAeroTools;
     private bool _suppressTableSelectionChanged;
     private bool _darkMode;
     private bool _isClosing;
@@ -399,6 +400,7 @@ public partial class MainWindow : Window
         try
         {
             _editor.AddEnginePartFromTemplate(_currentTableName, engineId, selected.Item1, selected.Item2);
+            ForceMenuMetadataTablesForNextImport(_currentTableName);
             AppendLog($"Added {_currentTableName} row for EngineID {engineId} from {selected.Item1} Id {selected.Item2}");
             LoadSelectedTable();
         }
@@ -521,6 +523,7 @@ public partial class MainWindow : Window
         {
             TryApplyCurrentTableChanges(showSuccess: false);
             _editor.AddEnginePartFromTemplate(table.Name, engine.EngineId, template.SourceTable, template.SourceId);
+            ForceMenuMetadataTablesForNextImport(table.Name);
             AppendLog($"Added {table.Name} row for EngineID {engine.EngineId} from {template.SourceTable} Id {template.SourceId}");
             RefreshPartTemplates();
             LoadSelectedPartRows();
@@ -548,6 +551,7 @@ public partial class MainWindow : Window
         {
             TryApplyCurrentTableChanges(showSuccess: false);
             var message = _editor.AddAspirationConversion(engine.EngineId, conversion.AspirationId);
+            ForceMenuMetadataTablesForNextImport(conversion.TableName);
             AppendLog(message);
             SyncPartTableToolChoice(conversion.TableName);
             RefreshPartTools();
@@ -619,6 +623,7 @@ public partial class MainWindow : Window
         {
             TryApplyCurrentTableChanges(showSuccess: false);
             var message = _editor.EnsureMenuMetadataForTable(table.Name);
+            ForceMenuMetadataTablesForNextImport(table.Name);
             AppendLog(message);
             RefreshPartTemplates();
             LoadSelectedPartRows();
@@ -674,6 +679,115 @@ public partial class MainWindow : Window
         }
     }
 
+    private async void ScanGameFiltersButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (!EnsureIdle())
+        {
+            return;
+        }
+        if (_editor is null ||
+            PartTableCombo.SelectedItem is not TableChoice table)
+        {
+            MessageBox.Show(this, "Pick an engine part table first.", "Scan Game Filters", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        var partNames = _editor.UpgradePartNamesForTable(table.Name);
+        string? report = null;
+        var ok = await RunToolAsync(
+            "Scanning game upgrade filter strings...",
+            token => Task.Run(() =>
+            {
+                report = GameMemoryScanner.ScanUpgradeFilterCandidates(
+                    table.Name,
+                    partNames,
+                    new Progress<string>(AppendLog),
+                    token);
+            }, token));
+
+        if (ok && report is not null)
+        {
+            RenderMenuProbeView(report);
+        }
+    }
+
+    private void AeroPartTableCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_loadingAeroTools)
+        {
+            return;
+        }
+
+        UpdateAeroToolButtons();
+        RefreshAeroTemplates();
+    }
+
+    private TemplateChoice? SelectedAeroTemplate()
+    {
+        if (AeroTemplateCombo.SelectedItem is TemplateChoice selected &&
+            !string.IsNullOrWhiteSpace(selected.SourceTable))
+        {
+            return selected;
+        }
+
+        return null;
+    }
+
+    private void LoadAeroPartRowsButton_Click(object sender, RoutedEventArgs e)
+    {
+        LoadSelectedAeroPartRows();
+    }
+
+    private void AddAeroPartButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_editor is null || _selectedCar is null || AeroPartTableCombo.SelectedItem is not AeroPartChoice choice)
+        {
+            MessageBox.Show(this, "Select a car and an aero part family first.", "Add Aero Part", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        try
+        {
+            TryApplyCurrentTableChanges(showSuccess: false);
+            var template = SelectedAeroTemplate();
+            var message = _editor.AddLinkedAeroOption(choice.TableName, _selectedCar.Id, template?.SourceId);
+            ForceMenuMetadataTablesForNextImport(choice.TableName);
+            if (AeroPartUsesPhysics(choice.TableName))
+            {
+                ForceLiveReplace("List_AeroPhysics");
+            }
+
+            AppendLog(message);
+            LoadSelectedTable();
+            RefreshAeroTemplates();
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, ex.Message, "Add Aero Part failed", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
+    private void WireAeroMenuButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_editor is null || AeroPartTableCombo.SelectedItem is not AeroPartChoice choice)
+        {
+            MessageBox.Show(this, "Pick an aero part family first.", "Wire Aero Menu", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        try
+        {
+            TryApplyCurrentTableChanges(showSuccess: false);
+            AppendLog(_editor.EnsureMenuMetadataForTable(choice.TableName));
+            ForceMenuMetadataTablesForNextImport(choice.TableName);
+            LoadSelectedTable();
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, ex.Message, "Wire Aero Menu failed", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+    }
+
     private void WireMenuButton_Click(object sender, RoutedEventArgs e)
     {
         if (_editor is null || _currentTableName is null || !_editor.CanWireMenuMetadata(_currentTableName))
@@ -686,6 +800,7 @@ public partial class MainWindow : Window
         {
             TryApplyCurrentTableChanges(showSuccess: false);
             AppendLog(_editor.EnsureMenuMetadataForTable(_currentTableName));
+            ForceMenuMetadataTablesForNextImport(_currentTableName);
             LoadSelectedTable();
         }
         catch (Exception ex)
@@ -705,13 +820,18 @@ public partial class MainWindow : Window
         try
         {
             TryApplyCurrentTableChanges(showSuccess: false);
+            string message;
             if (EditorConstants.UpgradeTableLinks.ContainsKey(_currentTableName))
             {
                 _editor.AddLinkedUpgradeOption(_currentTableName, _selectedCar.Id);
+                ForceMenuMetadataTablesForNextImport(_currentTableName);
+                message = $"Added option to {_currentTableName} for {_selectedCar.Title}";
             }
             else if (EditorConstants.AeroOptionTables.Contains(_currentTableName, StringComparer.OrdinalIgnoreCase))
             {
-                _editor.AddLinkedAeroOption(_currentTableName, _selectedCar.Id);
+                message = _editor.AddLinkedAeroOption(_currentTableName, _selectedCar.Id);
+                ForceMenuMetadataTablesForNextImport(_currentTableName);
+                ForceLiveReplace("List_AeroPhysics");
             }
             else
             {
@@ -719,7 +839,7 @@ public partial class MainWindow : Window
                 return;
             }
 
-            AppendLog($"Added option to {_currentTableName} for {_selectedCar.Title}");
+            AppendLog(message);
             LoadSelectedTable();
         }
         catch (Exception ex)
@@ -1457,10 +1577,6 @@ public partial class MainWindow : Window
             {
                 row.Delete();
                 TryApplyCurrentTableChanges(showSuccess: false);
-                if (_currentTableName is not null)
-                {
-                    ForceLiveReplace(_currentTableName);
-                }
                 ReloadCurrentTableAfterMutation();
             }
             catch (Exception ex)
@@ -1836,10 +1952,6 @@ public partial class MainWindow : Window
             {
                 row.Delete();
                 TryApplyCurrentTableChanges(showSuccess: false);
-                if (_currentTableName is not null)
-                {
-                    ForceLiveReplace(_currentTableName);
-                }
                 ReloadCurrentTableAfterMutation();
             }
             catch (Exception ex)
@@ -1967,9 +2079,11 @@ public partial class MainWindow : Window
     {
         var isEnginesTab = SelectedTabIndex() == 1;
         var isPartsTab = SelectedTabIndex() == 2;
+        var isAeroTab = SelectedTabIndex() == 5;
         var isValidateTab = IsValidateTab();
         EngineToolsPanel.Visibility = isEnginesTab ? Visibility.Visible : Visibility.Collapsed;
         PartToolsPanel.Visibility = isPartsTab ? Visibility.Visible : Visibility.Collapsed;
+        AeroToolsPanel.Visibility = isAeroTab ? Visibility.Visible : Visibility.Collapsed;
         TableToolbar.Visibility = isValidateTab ? Visibility.Collapsed : Visibility.Visible;
         UpdateAddLinkedOptionButton();
         UpdateWireMenuButton();
@@ -1980,6 +2094,10 @@ public partial class MainWindow : Window
         if (isPartsTab)
         {
             RefreshPartTools();
+        }
+        if (isAeroTab)
+        {
+            RefreshAeroTools();
         }
     }
 
@@ -2176,6 +2294,124 @@ public partial class MainWindow : Window
         RefreshAspirationConversions();
     }
 
+    private void RefreshAeroTools()
+    {
+        if (_editor is null || SelectedTabIndex() != 5)
+        {
+            return;
+        }
+
+        _loadingAeroTools = true;
+        try
+        {
+            var selectedTable = (AeroPartTableCombo.SelectedItem as AeroPartChoice)?.TableName;
+            var choices = EditorConstants.AeroTables
+                .Where(table => EditorConstants.AeroOptionTables.Contains(table, StringComparer.OrdinalIgnoreCase))
+                .Where(_editor.TableExists)
+                .Select(table => new AeroPartChoice(table, AeroPartLabel(table)))
+                .ToList();
+            AeroPartTableCombo.ItemsSource = choices;
+            AeroPartTableCombo.DisplayMemberPath = nameof(AeroPartChoice.Label);
+
+            if (!string.IsNullOrWhiteSpace(selectedTable))
+            {
+                AeroPartTableCombo.SelectedItem = choices.FirstOrDefault(c => c.TableName.Equals(selectedTable, StringComparison.OrdinalIgnoreCase));
+            }
+            if (AeroPartTableCombo.SelectedIndex < 0 && _currentTableName is not null)
+            {
+                AeroPartTableCombo.SelectedItem = choices.FirstOrDefault(c => c.TableName.Equals(_currentTableName, StringComparison.OrdinalIgnoreCase));
+            }
+            if (AeroPartTableCombo.SelectedIndex < 0 && choices.Count > 0)
+            {
+                AeroPartTableCombo.SelectedIndex = 0;
+            }
+        }
+        finally
+        {
+            _loadingAeroTools = false;
+        }
+
+        UpdateAeroToolButtons();
+        RefreshAeroTemplates();
+    }
+
+    private void UpdateAeroToolButtons()
+    {
+        var selected = AeroPartTableCombo.SelectedItem as AeroPartChoice;
+        var hasSelection = selected is not null;
+        var hasCar = _selectedCar is not null;
+        LoadAeroPartRowsButton.IsEnabled = hasSelection;
+        AddAeroPartButton.IsEnabled = hasSelection && hasCar;
+        WireAeroMenuButton.IsEnabled = hasSelection && _editor?.CanWireMenuMetadata(selected!.TableName) == true;
+
+        if (!hasSelection)
+        {
+            AeroPanelNote.Text = "No mapped aero part tables were found in this database.";
+            return;
+        }
+
+        AeroPanelNote.Text = hasCar
+            ? $"Adds another {selected!.Label} row for the selected car/body. Rear wing and front bumper rows also get a dedicated aero physics row."
+            : "Select a car before adding aero parts.";
+    }
+
+    private void RefreshAeroTemplates()
+    {
+        if (_editor is null || AeroPartTableCombo.SelectedItem is not AeroPartChoice choice)
+        {
+            AeroTemplateCombo.ItemsSource = null;
+            return;
+        }
+
+        var selected = AeroTemplateCombo.SelectedItem as TemplateChoice;
+        var templates = _editor.AeroPartTemplates(choice.TableName, _selectedCar?.Id)
+            .Select(t => new TemplateChoice(t.SourceTable, t.SourceId, t.Label))
+            .ToList();
+        var choices = new List<TemplateChoice> { new("", 0, "Auto template for this aero part family") };
+        choices.AddRange(templates);
+
+        AeroTemplateCombo.ItemsSource = choices;
+        AeroTemplateCombo.DisplayMemberPath = nameof(TemplateChoice.Label);
+        if (selected is not null)
+        {
+            AeroTemplateCombo.SelectedItem = choices.FirstOrDefault(t => t.SourceTable == selected.SourceTable && t.SourceId == selected.SourceId);
+        }
+        if (AeroTemplateCombo.SelectedIndex < 0)
+        {
+            AeroTemplateCombo.SelectedIndex = 0;
+        }
+    }
+
+    private void LoadSelectedAeroPartRows()
+    {
+        if (AeroPartTableCombo.SelectedItem is not AeroPartChoice choice)
+        {
+            return;
+        }
+
+        SelectTableChoice(choice.TableName);
+        LoadSelectedTable();
+    }
+
+    private static bool AeroPartUsesPhysics(string table)
+    {
+        return table.Equals("List_UpgradeRearWing", StringComparison.OrdinalIgnoreCase) ||
+               table.Equals("List_UpgradeCarBodyFrontBumper", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string AeroPartLabel(string table)
+    {
+        return table switch
+        {
+            "List_UpgradeRearWing" => "Rear Wing",
+            "List_UpgradeCarBodyFrontBumper" => "Front Bumper",
+            "List_UpgradeCarBodyRearBumper" => "Rear Bumper",
+            "List_UpgradeCarBodyHood" => "Hood",
+            "List_UpgradeCarBodySideSkirt" => "Side Skirts",
+            _ => table
+        };
+    }
+
     private TemplateChoice? SelectedPartTemplate()
     {
         if (PartTemplateCombo.SelectedItem is TemplateChoice selected &&
@@ -2293,6 +2529,17 @@ public partial class MainWindow : Window
         }
     }
 
+    private void ForceMenuMetadataTablesForNextImport(string? partTable = null)
+    {
+        ForceLiveReplace(
+            partTable ?? string.Empty,
+            "UpgradeTypes",
+            "UpgradeAreaForUpgradeType",
+            "Upgrades",
+            "UpgradeWizardParts",
+            "List_Aspiration");
+    }
+
     private void UpdateAspirationTypeButton()
     {
         var table = (PartTableCombo.SelectedItem as TableChoice)?.Name;
@@ -2318,6 +2565,10 @@ public partial class MainWindow : Window
         ProbeAllMenusButton.ToolTip = ProbeAllMenusButton.IsEnabled
             ? "Read-only summary of every engine part table for this engine. Use it to compare inferred base-data max levels before proving a real in-game cap."
             : null;
+        ScanGameFiltersButton.IsEnabled = SelectedTabIndex() == 2 && PartTableCombo.SelectedItem is TableChoice;
+        ScanGameFiltersButton.ToolTip = ScanGameFiltersButton.IsEnabled
+            ? "Scans the running game image for static SQL/filter/menu strings related to this table and PartName. Read-only; useful before deeper hooks."
+            : null;
     }
 
     private void LoadSelectedPartRows()
@@ -2341,14 +2592,18 @@ public partial class MainWindow : Window
 
     private void UpdateAddLinkedOptionButton()
     {
+        var isAero = _currentTableName is not null &&
+                     EditorConstants.AeroOptionTables.Contains(_currentTableName, StringComparer.OrdinalIgnoreCase);
         var canAdd = _selectedCar is not null &&
                      _currentTableName is not null &&
                      !IsValidateTab() &&
-                     (EditorConstants.UpgradeTableLinks.ContainsKey(_currentTableName) ||
-                      EditorConstants.AeroOptionTables.Contains(_currentTableName, StringComparer.OrdinalIgnoreCase));
+                     (EditorConstants.UpgradeTableLinks.ContainsKey(_currentTableName) || isAero);
+        AddLinkedOptionButton.Content = isAero ? "Add Aero Option" : "Add Option";
         AddLinkedOptionButton.Visibility = canAdd ? Visibility.Visible : Visibility.Collapsed;
         AddLinkedOptionButton.ToolTip = canAdd
-            ? "Add another option for this selected car/body/drivetrain/motor target using an existing row as a template."
+            ? isAero
+                ? "Add another aero/appearance row for this car or body, create menu metadata for the new level, and create a dedicated aero physics row when this table uses AeroPhysicsID."
+                : "Add another option for this selected car/body/drivetrain/motor target using an existing row as a template."
             : null;
     }
 
@@ -2428,6 +2683,12 @@ public partial class MainWindow : Window
         ResetGameButton.IsEnabled = !busy;
         ValidateButton.IsEnabled = !busy;
         ApplyChangesButton.IsEnabled = !busy;
+        ProbeMenuButton.IsEnabled = !busy;
+        ProbeAllMenusButton.IsEnabled = !busy;
+        ScanGameFiltersButton.IsEnabled = !busy;
+        LoadAeroPartRowsButton.IsEnabled = !busy && AeroPartTableCombo.SelectedItem is AeroPartChoice;
+        AddAeroPartButton.IsEnabled = !busy && _selectedCar is not null && AeroPartTableCombo.SelectedItem is AeroPartChoice;
+        WireAeroMenuButton.IsEnabled = !busy && AeroPartTableCombo.SelectedItem is AeroPartChoice choice && _editor?.CanWireMenuMetadata(choice.TableName) == true;
         CancelTaskButton.Visibility = busy ? Visibility.Visible : Visibility.Collapsed;
         ConnectionStateText.Text = busy ? "Working" : "Local";
     }

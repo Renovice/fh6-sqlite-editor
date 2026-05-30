@@ -511,6 +511,7 @@
                                     <Button x:Name="EnableAspirationTypeButton" Content="Wire Menu" Style="{StaticResource TopButton}" Margin="0,18,14,8" Click="EnableAspirationTypeButton_Click" Visibility="Collapsed"/>
                                     <Button x:Name="ProbeMenuButton" Content="Probe Menu" Style="{StaticResource TopButton}" Margin="0,18,14,8" Click="ProbeMenuButton_Click"/>
                                     <Button x:Name="ProbeAllMenusButton" Content="Probe All" Style="{StaticResource TopButton}" Margin="0,18,14,8" Click="ProbeAllMenusButton_Click"/>
+                                    <Button x:Name="ScanGameFiltersButton" Content="Scan Game Filters" Style="{StaticResource TopButton}" Margin="0,18,14,8" Click="ScanGameFiltersButton_Click"/>
                                     <StackPanel Width="380" Margin="0,0,10,8">
                                         <TextBlock Text="Aspiration Conversion" FontSize="11" FontWeight="SemiBold" Margin="0,0,0,4"/>
                                         <ComboBox x:Name="AspirationConversionCombo"/>
@@ -519,6 +520,29 @@
                                     <Button x:Name="RemoveAspirationConversionButton" Content="Remove Conversion" Style="{StaticResource TopButton}" Margin="0,18,0,8" Click="RemoveAspirationConversionButton_Click"/>
                                 </WrapPanel>
                                 <TextBlock x:Name="PartPanelNote" Grid.Row="1" Text="Pick an engine and part table, then copy a compatible template row into that engine." FontSize="12"/>
+                            </Grid>
+                        </Border>
+
+                        <Border x:Name="AeroToolsPanel" Margin="0,10,0,0" Padding="10" BorderThickness="1" CornerRadius="8" Visibility="Collapsed">
+                            <Grid>
+                                <Grid.RowDefinitions>
+                                    <RowDefinition Height="Auto"/>
+                                    <RowDefinition Height="Auto"/>
+                                </Grid.RowDefinitions>
+                                <WrapPanel>
+                                    <StackPanel Width="320" Margin="0,0,10,8">
+                                        <TextBlock Text="Aero Part Family" FontSize="11" FontWeight="SemiBold" Margin="0,0,0,4"/>
+                                        <ComboBox x:Name="AeroPartTableCombo" SelectionChanged="AeroPartTableCombo_SelectionChanged"/>
+                                    </StackPanel>
+                                    <StackPanel Width="520" Margin="0,0,10,8">
+                                        <TextBlock Text="Copy Values From" FontSize="11" FontWeight="SemiBold" Margin="0,0,0,4"/>
+                                        <ComboBox x:Name="AeroTemplateCombo"/>
+                                    </StackPanel>
+                                    <Button x:Name="LoadAeroPartRowsButton" Content="Load Part Rows" Style="{StaticResource TopButton}" Margin="0,18,8,8" Click="LoadAeroPartRowsButton_Click"/>
+                                    <Button x:Name="AddAeroPartButton" Content="Add Aero Part" Style="{StaticResource TopButton}" Margin="0,18,8,8" Click="AddAeroPartButton_Click"/>
+                                    <Button x:Name="WireAeroMenuButton" Content="Wire Menu" Style="{StaticResource TopButton}" Margin="0,18,0,8" Click="WireAeroMenuButton_Click"/>
+                                </WrapPanel>
+                                <TextBlock x:Name="AeroPanelNote" Grid.Row="1" Text="Pick a part family, then add another row for the selected car/body with matching menu metadata." FontSize="12"/>
                             </Grid>
                         </Border>
                     </StackPanel>

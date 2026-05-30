@@ -10,7 +10,10 @@ internal static class NativeMethods
     public const uint MemRelease = 0x8000;
     public const uint PageNoAccess = 0x01;
     public const uint PageReadWrite = 0x04;
+    public const uint PageExecute = 0x10;
+    public const uint PageExecuteRead = 0x20;
     public const uint PageExecuteReadWrite = 0x40;
+    public const uint PageExecuteWriteCopy = 0x80;
     public const uint PageGuard = 0x100;
     public const uint WaitObject0 = 0;
     public const uint MemCommitState = 0x1000;

@@ -112,10 +112,10 @@ internal sealed class GameDatabaseImporter
                 var forceReplace = forceReplaceTables.Contains(table.Name);
                 if (forceReplace)
                 {
-                    log.Report($"{table.Name}: forced full replace so live game deletions are applied");
+                    log.Report($"{table.Name}: forced import");
                 }
 
-                var patched = !forceReplace && !importAll && diff is not null && PatchTable(process, db, diff, table, log);
+                var patched = !importAll && diff is not null && PatchTable(process, db, diff, table, log);
                 if (!patched)
                 {
                     ImportWholeTable(process, db, edited, table, log, cancellationToken);
@@ -445,22 +445,23 @@ internal sealed class GameDatabaseImporter
             return false;
         }
 
-        var pk = PrimaryKeyIndexes(baseColumns);
-        if (pk.Count == 0)
+        var key = PatchKeyIndexes(diff, table.Name, baseColumns);
+        if (key.Count == 0)
         {
+            log.Report($"{table.Name}: no declared or inferred stable key; using full replace");
             return false;
         }
 
         var mainTable = QualifiedTable("main", table.Name);
         var editedTable = QualifiedTable("edited", table.Name);
-        var joinSql = JoinOnPk(baseColumns, pk);
-        var changeSql = ChangedColumnsWhere(baseColumns);
-        var firstPk = baseColumns[pk[0]].Name;
+        var joinSql = JoinOnPk(baseColumns, key);
+        var changeSql = ChangedColumnsWhere(baseColumns, key);
+        var firstKey = baseColumns[key[0]].Name;
 
         var deletedCount = ScalarLong(diff,
-            $"SELECT count(*) FROM {mainTable} b LEFT JOIN {editedTable} e ON {joinSql} WHERE {AliasedCol("e", firstPk)} IS NULL");
+            $"SELECT count(*) FROM {mainTable} b LEFT JOIN {editedTable} e ON {joinSql} WHERE {AliasedCol("e", firstKey)} IS NULL");
         var insertedCount = ScalarLong(diff,
-            $"SELECT count(*) FROM {editedTable} e LEFT JOIN {mainTable} b ON {joinSql} WHERE {AliasedCol("b", firstPk)} IS NULL");
+            $"SELECT count(*) FROM {editedTable} e LEFT JOIN {mainTable} b ON {joinSql} WHERE {AliasedCol("b", firstKey)} IS NULL");
         var updatedCount = ScalarLong(diff,
             $"SELECT count(*) FROM {editedTable} e JOIN {mainTable} b ON {joinSql} WHERE {changeSql}");
         var total = deletedCount + insertedCount + updatedCount;
@@ -475,12 +476,12 @@ internal sealed class GameDatabaseImporter
         using (var cmd = diff.CreateCommand())
         {
             cmd.CommandText =
-                "SELECT " + string.Join(", ", pk.Select(i => AliasedCol("b", baseColumns[i].Name))) +
-                $" FROM {mainTable} b LEFT JOIN {editedTable} e ON {joinSql} WHERE {AliasedCol("e", firstPk)} IS NULL";
+                "SELECT " + string.Join(", ", key.Select(i => AliasedCol("b", baseColumns[i].Name))) +
+                $" FROM {mainTable} b LEFT JOIN {editedTable} e ON {joinSql} WHERE {AliasedCol("e", firstKey)} IS NULL";
             using var reader = cmd.ExecuteReader();
             while (reader.Read())
             {
-                var sql = $"DELETE FROM {SqliteHelpers.GameIdent(table.Name)} WHERE {WherePkFromPkReader(reader, baseColumns, pk)}";
+                var sql = $"DELETE FROM {SqliteHelpers.GameIdent(table.Name)} WHERE {WherePkFromPkReader(reader, baseColumns, key)}";
                 GameSql.Execute(process, gameDb, sql);
                 applied++;
             }
@@ -492,12 +493,12 @@ internal sealed class GameDatabaseImporter
             using var reader = cmd.ExecuteReader();
             while (reader.Read())
             {
-                var assignments = AssignmentsFromRow(reader, baseColumns);
+                var assignments = AssignmentsFromRow(reader, baseColumns, key);
                 if (assignments.Length == 0)
                 {
                     continue;
                 }
-                var sql = $"UPDATE {SqliteHelpers.GameIdent(table.Name)} SET {assignments} WHERE {WherePkFromRow(reader, baseColumns, pk)}";
+                var sql = $"UPDATE {SqliteHelpers.GameIdent(table.Name)} SET {assignments} WHERE {WherePkFromRow(reader, baseColumns, key)}";
                 GameSql.Execute(process, gameDb, sql);
                 applied++;
             }
@@ -505,7 +506,7 @@ internal sealed class GameDatabaseImporter
 
         using (var cmd = diff.CreateCommand())
         {
-            cmd.CommandText = $"SELECT e.* FROM {editedTable} e LEFT JOIN {mainTable} b ON {joinSql} WHERE {AliasedCol("b", firstPk)} IS NULL";
+            cmd.CommandText = $"SELECT e.* FROM {editedTable} e LEFT JOIN {mainTable} b ON {joinSql} WHERE {AliasedCol("b", firstKey)} IS NULL";
             using var reader = cmd.ExecuteReader();
             while (reader.Read())
             {
@@ -598,6 +599,100 @@ internal sealed class GameDatabaseImporter
             .ToList();
     }
 
+    private static List<int> PatchKeyIndexes(SqliteConnection db, string table, IReadOnlyList<ColumnInfo> columns)
+    {
+        var declared = PrimaryKeyIndexes(columns);
+        if (declared.Count > 0)
+        {
+            return declared;
+        }
+
+        foreach (var candidate in LogicalKeyCandidates(table, columns))
+        {
+            if (KeyUsableInBothSchemas(db, table, columns, candidate))
+            {
+                return candidate;
+            }
+        }
+
+        return [];
+    }
+
+    private static IEnumerable<List<int>> LogicalKeyCandidates(string table, IReadOnlyList<ColumnInfo> columns)
+    {
+        List<int>? indexes(params string[] names)
+        {
+            var result = new List<int>();
+            foreach (var name in names)
+            {
+                var index = -1;
+                for (var i = 0; i < columns.Count; i++)
+                {
+                    if (columns[i].Name.Equals(name, StringComparison.OrdinalIgnoreCase))
+                    {
+                        index = i;
+                        break;
+                    }
+                }
+                if (index < 0)
+                {
+                    return null;
+                }
+                result.Add(index);
+            }
+            return result;
+        }
+
+        if (table.Equals("UpgradeWizardParts", StringComparison.OrdinalIgnoreCase))
+        {
+            var wizardKey = indexes("PartName", "PartLevel");
+            if (wizardKey is not null)
+            {
+                yield return wizardKey;
+            }
+        }
+
+        foreach (var preferred in new[] { "id", "Id", "ID" })
+        {
+            var key = indexes(preferred);
+            if (key is not null)
+            {
+                yield return key;
+            }
+        }
+
+        foreach (var column in columns.Select((c, i) => (c.Name, Index: i)))
+        {
+            if (column.Name.EndsWith("ID", StringComparison.OrdinalIgnoreCase) ||
+                column.Name.EndsWith("Id", StringComparison.OrdinalIgnoreCase))
+            {
+                yield return [column.Index];
+            }
+        }
+    }
+
+    private static bool KeyUsableInBothSchemas(SqliteConnection db, string table, IReadOnlyList<ColumnInfo> columns, IReadOnlyList<int> key)
+    {
+        return KeyUsable(db, "main", table, columns, key) &&
+               KeyUsable(db, "edited", table, columns, key);
+    }
+
+    private static bool KeyUsable(SqliteConnection db, string schema, string table, IReadOnlyList<ColumnInfo> columns, IReadOnlyList<int> key)
+    {
+        var qualified = QualifiedTable(schema, table);
+        var keyColumns = key.Select(i => SqliteHelpers.Ident(columns[i].Name)).ToList();
+        var nonNull = string.Join(" AND ", keyColumns.Select(c => $"{c} IS NOT NULL"));
+        var total = ScalarLong(db, $"SELECT count(*) FROM {qualified}");
+        var keyed = ScalarLong(db, $"SELECT count(*) FROM {qualified} WHERE {nonNull}");
+        if (total != keyed)
+        {
+            return false;
+        }
+
+        return !ScalarExists(db,
+            $"SELECT 1 FROM (SELECT {string.Join(", ", keyColumns)} FROM {qualified} GROUP BY {string.Join(", ", keyColumns)} HAVING count(*)>1) LIMIT 1");
+    }
+
     private static string JoinOnPk(IReadOnlyList<ColumnInfo> columns, IReadOnlyList<int> pk)
     {
         return string.Join(" AND ", pk.Select(i =>
@@ -607,21 +702,24 @@ internal sealed class GameDatabaseImporter
         }));
     }
 
-    private static string ChangedColumnsWhere(IReadOnlyList<ColumnInfo> columns)
+    private static string ChangedColumnsWhere(IReadOnlyList<ColumnInfo> columns, IReadOnlyList<int> key)
     {
+        var keySet = key.ToHashSet();
         var parts = columns
-            .Where(c => c.PrimaryKeyRank == 0)
-            .Select(c => $"{AliasedCol("e", c.Name)} IS NOT {AliasedCol("b", c.Name)}")
+            .Select((c, i) => (Column: c, Index: i))
+            .Where(c => !keySet.Contains(c.Index))
+            .Select(c => $"{AliasedCol("e", c.Column.Name)} IS NOT {AliasedCol("b", c.Column.Name)}")
             .ToList();
         return parts.Count == 0 ? "0" : string.Join(" OR ", parts);
     }
 
-    private static string AssignmentsFromRow(SqliteDataReader reader, IReadOnlyList<ColumnInfo> columns)
+    private static string AssignmentsFromRow(SqliteDataReader reader, IReadOnlyList<ColumnInfo> columns, IReadOnlyList<int> key)
     {
+        var keySet = key.ToHashSet();
         var assignments = new List<string>();
         for (var i = 0; i < columns.Count; i++)
         {
-            if (columns[i].PrimaryKeyRank > 0)
+            if (keySet.Contains(i))
             {
                 continue;
             }

@@ -25,6 +25,16 @@ public sealed record AspirationConversionChoice(long AspirationId, string TableN
     public override string ToString() => Label;
 }
 
+public sealed record MenuDisplayChoice(long UpgradeId, string PartName, long Level, string Label, string IconPath, string ImagePath)
+{
+    public override string ToString() => Label;
+}
+
+public sealed record AeroPartChoice(string TableName, string Label)
+{
+    public override string ToString() => Label;
+}
+
 internal sealed record ColumnInfo(string Name, string Type, int PrimaryKeyRank);
 
 internal sealed record LocalTable(string Name, long RowCount, bool Changed);
