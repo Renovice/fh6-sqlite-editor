@@ -37,6 +37,9 @@ dotnet publish "New Native WPF Editor/fh6_sqlite_native/FH6SQLiteEditorNative.cs
 
 The publish output is local-only and ignored by git.
 
+
+if you want to Support me buy me a coffee  https://ko-fi.com/grayenjoyer50
+
 ## Notes
 
 This is a modding/research utility. Keep backups of your DB dumps and treat live game import/reset features as experimental.
