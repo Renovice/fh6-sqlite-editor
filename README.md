@@ -43,3 +43,6 @@ if you want to Support me buy me a coffee  https://ko-fi.com/grayenjoyer50
 ## Notes
 
 This is a modding/research utility. Keep backups of your DB dumps and treat live game import/reset features as experimental.
+
+
+IF you want to support me https://ko-fi.com/grayenjoyer50
